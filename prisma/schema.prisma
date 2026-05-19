@@ -1,0 +1,86 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model SheetConfig {
+  id            String         @id @default(cuid())
+  shop          String         @unique
+  sheetUrl      String
+  spreadsheetId String
+  sheetName     String         @default("Sheet1")
+  skuColumn     String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  mappings      FieldMapping[]
+  schedule      SyncSchedule?
+}
+
+model FieldMapping {
+  id            String      @id @default(cuid())
+  sheetConfigId String
+  sheetColumn   String
+  shopifyField  String
+  createdAt     DateTime    @default(now())
+  sheetConfig   SheetConfig @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+
+  @@unique([sheetConfigId, sheetColumn])
+  @@unique([sheetConfigId, shopifyField])
+}
+
+model SyncSchedule {
+  id            String      @id @default(cuid())
+  sheetConfigId String      @unique
+  intervalHours Int?
+  isEnabled     Boolean     @default(false)
+  nextRunAt     DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  sheetConfig   SheetConfig @relation(fields: [sheetConfigId], references: [id], onDelete: Cascade)
+}
+
+model SyncLog {
+  id            String    @id @default(cuid())
+  shop          String
+  triggeredBy   String
+  status        String
+  totalRows     Int       @default(0)
+  updatedCount  Int       @default(0)
+  skippedCount  Int       @default(0)
+  errorCount    Int       @default(0)
+  errorMessages String?
+  startedAt     DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([shop, startedAt])
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}

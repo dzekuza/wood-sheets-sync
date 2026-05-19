@@ -1,0 +1,31 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "ed208fa1e2de849d9609fe11690ad203"
+name = "wood-sheets-sync"
+application_url = "https://wood-sheets-sync.fly.dev"
+embedded = true
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_products"
+
+[webhooks]
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+[auth]
+redirect_urls = [
+  "https://wood-sheets-sync.fly.dev/auth/callback",
+  "https://wood-sheets-sync.fly.dev/auth/shopify/callback",
+  "https://wood-sheets-sync.fly.dev/api/auth/callback"
+]
+
+[build]
+automatically_update_urls_on_dev = true
