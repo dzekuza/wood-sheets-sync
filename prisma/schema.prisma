@@ -20,6 +20,7 @@ model SheetConfig {
   spreadsheetId String
   sheetName     String         @default("Sheet1")
   skuColumn     String?
+  matchField    String         @default("sku")
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   mappings      FieldMapping[]

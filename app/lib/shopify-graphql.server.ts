@@ -45,6 +45,96 @@ export async function findVariantBySku(
   };
 }
 
+// ── Query: find a product by title ────────────────────────────────────────────
+
+const FIND_PRODUCT_BY_TITLE = `#graphql
+  query FindProductByTitle($query: String!) {
+    products(first: 1, query: $query) {
+      edges {
+        node {
+          id
+          variants(first: 1) {
+            edges {
+              node { id }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export async function findProductByTitle(
+  admin: AdminApiContext,
+  title: string
+): Promise<{ variantId: string; productId: string } | null> {
+  const response = await admin.graphql(FIND_PRODUCT_BY_TITLE, {
+    variables: { query: `title:"${title}"` },
+  });
+
+  const data = (await response.json()) as {
+    data?: {
+      products?: {
+        edges: Array<{
+          node: {
+            id: string;
+            variants: { edges: Array<{ node: { id: string } }> };
+          };
+        }>;
+      };
+    };
+  };
+
+  const node = data.data?.products?.edges?.[0]?.node;
+  if (!node) return null;
+
+  return {
+    productId: node.id,
+    variantId: node.variants.edges[0]?.node.id ?? "",
+  };
+}
+
+// ── Query: find a product by handle ───────────────────────────────────────────
+
+const FIND_PRODUCT_BY_HANDLE = `#graphql
+  query FindProductByHandle($handle: String!) {
+    productByHandle(handle: $handle) {
+      id
+      variants(first: 1) {
+        edges {
+          node { id }
+        }
+      }
+    }
+  }
+`;
+
+export async function findProductByHandle(
+  admin: AdminApiContext,
+  handle: string
+): Promise<{ variantId: string; productId: string } | null> {
+  const response = await admin.graphql(FIND_PRODUCT_BY_HANDLE, {
+    variables: { handle },
+  });
+
+  const data = (await response.json()) as {
+    data?: {
+      productByHandle?: {
+        id: string;
+        variants: { edges: Array<{ node: { id: string } }> };
+      } | null;
+    };
+  };
+
+  const product = data.data?.productByHandle;
+  if (!product) return null;
+
+  return {
+    productId: product.id,
+    variantId: product.variants.edges[0]?.node.id ?? "",
+  };
+}
+
 // ── Mutation: update product-level fields ─────────────────────────────────────
 
 const UPDATE_PRODUCT = `#graphql

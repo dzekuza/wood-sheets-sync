@@ -3,6 +3,8 @@ import prisma from "~/db.server";
 import { fetchSheetRows } from "~/lib/google-sheets.server";
 import {
   findVariantBySku,
+  findProductByTitle,
+  findProductByHandle,
   updateProductFields,
   updateVariantFields,
   createProduct,
@@ -98,9 +100,10 @@ export async function runSync(
       headerIndex.set(header, idx);
     });
 
-    // 5. Resolve the SKU column index
-    const skuColumnIndex = config.skuColumn != null ? headerIndex.get(config.skuColumn) : undefined;
-    if (skuColumnIndex === undefined) {
+    // 5. Resolve the identifier column index
+    const matchField = config.matchField ?? "sku";
+    const identifierColumnIndex = config.skuColumn != null ? headerIndex.get(config.skuColumn) : undefined;
+    if (identifierColumnIndex === undefined) {
       await updateSyncLog(logId, {
         status: "failed",
         totalRows,
@@ -108,7 +111,7 @@ export async function runSync(
         skippedCount: 0,
         errorCount: 1,
         errorMessages: [
-          `SKU column "${config.skuColumn}" not found in sheet headers: [${headers.join(", ")}]`,
+          `Identifier column "${config.skuColumn}" not found in sheet headers: [${headers.join(", ")}]`,
         ],
         completedAt: new Date(),
       });
@@ -117,9 +120,9 @@ export async function runSync(
 
     // 6. Process each data row
     for (const row of dataRows) {
-      const sku = row[skuColumnIndex]?.trim() ?? "";
+      const identifier = row[identifierColumnIndex]?.trim() ?? "";
 
-      if (!sku) {
+      if (!identifier) {
         skippedCount++;
         continue;
       }
@@ -185,12 +188,20 @@ export async function runSync(
         }
       }
 
-      // Find the variant in Shopify by SKU
-      const variant = await findVariantBySku(admin, sku);
+      // Find the product/variant in Shopify using the configured match field
+      let variant: { variantId: string; productId: string } | null = null;
+      if (matchField === "title") {
+        variant = await findProductByTitle(admin, identifier);
+      } else if (matchField === "handle") {
+        variant = await findProductByHandle(admin, identifier);
+      } else {
+        variant = await findVariantBySku(admin, identifier);
+      }
 
       if (!variant) {
         // No existing product — create one
-        const title = productPayload.title ?? sku;
+        const title = productPayload.title ?? identifier;
+        const sku = matchField === "sku" ? identifier : undefined;
         const result = await createProduct(admin, {
           title,
           bodyHtml: productPayload.bodyHtml,
@@ -204,7 +215,7 @@ export async function runSync(
         });
 
         if ("errors" in result) {
-          errorMessages.push(...result.errors.map((e) => `[create ${sku}] ${e}`));
+          errorMessages.push(...result.errors.map((e) => `[create ${identifier}] ${e}`));
           errorCount++;
         } else {
           updatedCount++;
@@ -242,7 +253,7 @@ export async function runSync(
       if (rowErrors.length > 0) {
         errorCount++;
         errorMessages.push(
-          `SKU ${sku}: ${rowErrors.join("; ")}`
+          `${identifier}: ${rowErrors.join("; ")}`
         );
       } else {
         updatedCount++;

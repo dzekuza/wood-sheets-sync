@@ -30,6 +30,7 @@ type LoaderData = {
     sheetUrl: string;
     sheetName: string;
     skuColumn: string | null;
+    matchField: string;
     mappings: FieldMapping[];
   } | null;
 };
@@ -49,6 +50,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           sheetUrl: config.sheetUrl,
           sheetName: config.sheetName,
           skuColumn: config.skuColumn,
+          matchField: config.matchField ?? "sku",
           mappings: config.mappings.map((m) => ({
             sheetColumn: m.sheetColumn,
             shopifyField: m.shopifyField,
@@ -66,9 +68,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const sheetUrl = formData.get("sheetUrl") as string;
   const sheetName = (formData.get("sheetName") as string) || "Sheet1";
   const skuColumn = formData.get("skuColumn") as string;
+  const matchField = (formData.get("matchField") as string) || "sku";
 
   if (!sheetUrl || !skuColumn) {
-    return json({ error: "Sheet URL and SKU column are required." }, { status: 400 });
+    return json({ error: "Sheet URL and identifier column are required." }, { status: 400 });
   }
 
   let spreadsheetId: string;
@@ -94,12 +97,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (existing) {
     await prisma.sheetConfig.update({
       where: { id: existing.id },
-      data: { sheetUrl, sheetName, skuColumn, spreadsheetId },
+      data: { sheetUrl, sheetName, skuColumn, spreadsheetId, matchField },
     });
     configId = existing.id;
   } else {
     const created = await prisma.sheetConfig.create({
-      data: { shop, sheetUrl, sheetName, skuColumn, spreadsheetId },
+      data: { shop, sheetUrl, sheetName, skuColumn, spreadsheetId, matchField },
     });
     configId = created.id;
   }
@@ -145,8 +148,9 @@ export default function Settings() {
   const initialHeaders = config?.mappings.map((m) => m.sheetColumn) ?? [];
   const displayHeaders = headers.length > 0 ? headers : initialHeaders;
 
-  // SKU column selection
+  // Identifier column + match type
   const [skuColumn, setSkuColumn] = useState(config?.skuColumn ?? "");
+  const [matchField, setMatchField] = useState(config?.matchField ?? "sku");
 
   // Mapping state: column name → shopify field
   const [mappings, setMappings] = useState<Record<string, string>>(() => {
@@ -183,6 +187,7 @@ export default function Settings() {
     formData.append("sheetUrl", sheetUrl);
     formData.append("sheetName", sheetName);
     formData.append("skuColumn", skuColumn);
+    formData.append("matchField", matchField);
     for (const [column, field] of Object.entries(mappings)) {
       formData.append(`field_mapping_${column}`, field);
     }
@@ -271,16 +276,34 @@ export default function Settings() {
                     Step 2: Map columns to Shopify fields
                   </Text>
                   <Text as="p" variant="bodyMd" tone="subdued">
-                    Choose which sheet column contains the SKU (used to identify
-                    products), then map other columns to Shopify product fields.
+                    Choose how to match sheet rows to existing Shopify products,
+                    then map other columns to Shopify product fields.
                   </Text>
 
                   <Select
-                    label="SKU column (identifier)"
+                    label="Match type"
+                    options={[
+                      { label: "Variant SKU", value: "sku" },
+                      { label: "Product title", value: "title" },
+                      { label: "Product handle", value: "handle" },
+                    ]}
+                    value={matchField}
+                    onChange={setMatchField}
+                    helpText="How to look up existing products in Shopify. Use 'Variant SKU' if your products have SKUs set; 'Product title' or 'Product handle' to match existing products by those fields."
+                  />
+
+                  <Select
+                    label="Identifier column"
                     options={skuOptions}
                     value={skuColumn}
                     onChange={setSkuColumn}
-                    helpText="This column's value will be used to look up the product in Shopify."
+                    helpText={
+                      matchField === "sku"
+                        ? "The sheet column whose value matches the variant SKU in Shopify."
+                        : matchField === "title"
+                        ? "The sheet column whose value matches the product title in Shopify."
+                        : "The sheet column whose value matches the product handle (URL slug) in Shopify."
+                    }
                   />
 
                   <Divider />
