@@ -45,6 +45,102 @@ export async function findVariantBySku(
   };
 }
 
+// ── Query: list products (for dashboard table) ────────────────────────────────
+
+const LIST_PRODUCTS = `#graphql
+  query ListProducts($first: Int!, $after: String) {
+    products(first: $first, after: $after, sortKey: TITLE) {
+      edges {
+        node {
+          id
+          title
+          handle
+          status
+          variants(first: 1) {
+            edges {
+              node {
+                id
+                sku
+                price
+              }
+            }
+          }
+        }
+        cursor
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+export type ShopifyProductRow = {
+  id: string;
+  title: string;
+  handle: string;
+  status: string;
+  sku: string;
+  price: string;
+  variantId: string;
+};
+
+export async function listProducts(
+  admin: AdminApiContext,
+  limit = 100
+): Promise<ShopifyProductRow[]> {
+  const results: ShopifyProductRow[] = [];
+  let after: string | undefined;
+
+  while (results.length < limit) {
+    const batchSize = Math.min(50, limit - results.length);
+    const response = await admin.graphql(LIST_PRODUCTS, {
+      variables: { first: batchSize, after: after ?? null },
+    });
+
+    const data = (await response.json()) as {
+      data?: {
+        products?: {
+          edges: Array<{
+            cursor: string;
+            node: {
+              id: string;
+              title: string;
+              handle: string;
+              status: string;
+              variants: {
+                edges: Array<{ node: { id: string; sku: string; price: string } }>;
+              };
+            };
+          }>;
+          pageInfo: { hasNextPage: boolean; endCursor: string };
+        };
+      };
+    };
+
+    const edges = data.data?.products?.edges ?? [];
+    for (const { node } of edges) {
+      const variant = node.variants.edges[0]?.node;
+      results.push({
+        id: node.id,
+        title: node.title,
+        handle: node.handle,
+        status: node.status,
+        sku: variant?.sku ?? "",
+        price: variant?.price ?? "",
+        variantId: variant?.id ?? "",
+      });
+    }
+
+    const pageInfo = data.data?.products?.pageInfo;
+    if (!pageInfo?.hasNextPage) break;
+    after = pageInfo.endCursor;
+  }
+
+  return results;
+}
+
 // ── Query: find a product by title ────────────────────────────────────────────
 
 const FIND_PRODUCT_BY_TITLE = `#graphql

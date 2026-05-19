@@ -10,53 +10,124 @@ import {
   Banner,
   BlockStack,
   InlineStack,
+  IndexTable,
+  Badge,
+  Link,
+  Tooltip,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { runSync } from "../lib/shopify-sync.server";
+import { listProducts } from "../lib/shopify-graphql.server";
+import { fetchSheetRows } from "../lib/google-sheets.server";
 import type { SyncLog } from "../lib/sync-logger.server";
 
-type SheetConfigWithCount = {
+type ProductRow = {
   id: string;
-  sheetUrl: string;
-  sheetName: string;
-  skuColumn: string | null;
-  mappingsCount: number;
+  title: string;
+  handle: string;
+  sku: string;
+  price: string;
+  status: string;
+  synced: boolean;
+  identifier: string;
 };
 
 type LoaderData = {
   shop: string;
-  config: SheetConfigWithCount | null;
+  config: {
+    id: string;
+    sheetUrl: string;
+    sheetName: string;
+    skuColumn: string | null;
+    matchField: string;
+    mappingsCount: number;
+  } | null;
   lastLog: SyncLog | null;
+  products: ProductRow[];
+  sheetError: string | null;
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const config = await prisma.sheetConfig.findFirst({
-    where: { shop },
-    include: { mappings: true },
-  });
+  const [config, lastLog] = await Promise.all([
+    prisma.sheetConfig.findFirst({ where: { shop }, include: { mappings: true } }),
+    prisma.syncLog.findFirst({ where: { shop }, orderBy: { startedAt: "desc" } }),
+  ]);
 
-  const lastLog = await prisma.syncLog.findFirst({
-    where: { shop },
-    orderBy: { startedAt: "desc" },
+  // Fetch Shopify products
+  const shopifyProducts = await listProducts(admin, 100);
+
+  // If no config, all products are "shopify only"
+  if (!config) {
+    return json<LoaderData>({
+      shop,
+      config: null,
+      lastLog,
+      sheetError: null,
+      products: shopifyProducts.map((p) => ({
+        ...p,
+        synced: false,
+        identifier: "",
+      })),
+    });
+  }
+
+  // Fetch sheet rows and build identifier set
+  let sheetIdentifiers = new Set<string>();
+  let sheetError: string | null = null;
+  const matchField = config.matchField ?? "sku";
+
+  try {
+    const rows = await fetchSheetRows(config.spreadsheetId, config.sheetName);
+    if (rows.length >= 2 && config.skuColumn) {
+      const headers = rows[0];
+      const colIndex = headers.indexOf(config.skuColumn);
+      if (colIndex !== -1) {
+        for (const row of rows.slice(1)) {
+          const val = row[colIndex]?.trim();
+          if (val) sheetIdentifiers.add(val.toLowerCase());
+        }
+      }
+    }
+  } catch (err) {
+    sheetError = err instanceof Error ? err.message : "Could not load sheet data.";
+  }
+
+  const products: ProductRow[] = shopifyProducts.map((p) => {
+    let identifier = "";
+    let synced = false;
+
+    if (matchField === "title") {
+      identifier = p.title;
+      synced = sheetIdentifiers.has(p.title.toLowerCase());
+    } else if (matchField === "handle") {
+      identifier = p.handle;
+      synced = sheetIdentifiers.has(p.handle.toLowerCase());
+    } else {
+      identifier = p.sku;
+      synced = Boolean(p.sku) && sheetIdentifiers.has(p.sku.toLowerCase());
+    }
+
+    return { ...p, identifier, synced };
   });
 
   return json<LoaderData>({
     shop,
-    config: config
-      ? {
-          id: config.id,
-          sheetUrl: config.sheetUrl,
-          sheetName: config.sheetName,
-          skuColumn: config.skuColumn,
-          mappingsCount: config.mappings.length,
-        }
-      : null,
+    config: {
+      id: config.id,
+      sheetUrl: config.sheetUrl,
+      sheetName: config.sheetName,
+      skuColumn: config.skuColumn,
+      matchField,
+      mappingsCount: config.mappings.length,
+    },
     lastLog,
+    products,
+    sheetError,
   });
 };
 
@@ -66,15 +137,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return json(result);
 };
 
+const MATCH_FIELD_LABEL: Record<string, string> = {
+  sku: "SKU",
+  title: "Title",
+  handle: "Handle",
+};
+
 export default function Index() {
-  const { config, lastLog } = useLoaderData<typeof loader>();
+  const { config, lastLog, products, sheetError } =
+    useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const navigate = useNavigate();
 
-  const isSyncing =
-    fetcher.state !== "idle" && fetcher.formMethod === "POST";
-
+  const isSyncing = fetcher.state !== "idle" && fetcher.formMethod === "POST";
   const syncResult = fetcher.data;
+
+  const syncedCount = products.filter((p) => p.synced).length;
+  const matchLabel = config ? (MATCH_FIELD_LABEL[config.matchField] ?? "SKU") : "SKU";
 
   return (
     <Page>
@@ -97,71 +176,60 @@ export default function Index() {
                 </Banner>
               )}
 
+              {sheetError && (
+                <Banner title="Could not load sheet data" tone="warning">
+                  <Text as="p" variant="bodyMd">{sheetError}</Text>
+                </Banner>
+              )}
+
               {config && (
                 <Card>
                   <BlockStack gap="400">
-                    <Text as="h2" variant="headingMd">
-                      Connected Sheet
-                    </Text>
-                    <BlockStack gap="200">
-                      <InlineStack gap="200" align="start">
-                        <Text as="span" variant="bodyMd" fontWeight="semibold">
-                          URL:
-                        </Text>
-                        <Text as="span" variant="bodyMd">
-                          {config.sheetUrl}
-                        </Text>
+                    <InlineStack align="space-between" blockAlign="center">
+                      <Text as="h2" variant="headingMd">Connected Sheet</Text>
+                      <InlineStack gap="300">
+                        <fetcher.Form method="post">
+                          <Button variant="primary" submit loading={isSyncing}>
+                            Sync Now
+                          </Button>
+                        </fetcher.Form>
+                        <Button variant="plain" onClick={() => navigate("/app/settings")}>
+                          Edit settings
+                        </Button>
                       </InlineStack>
-                      <InlineStack gap="200" align="start">
-                        <Text as="span" variant="bodyMd" fontWeight="semibold">
-                          Tab:
-                        </Text>
-                        <Text as="span" variant="bodyMd">
-                          {config.sheetName}
-                        </Text>
+                    </InlineStack>
+
+                    <BlockStack gap="100">
+                      <InlineStack gap="200">
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">Tab:</Text>
+                        <Text as="span" variant="bodyMd">{config.sheetName}</Text>
                       </InlineStack>
-                      <InlineStack gap="200" align="start">
-                        <Text as="span" variant="bodyMd" fontWeight="semibold">
-                          Field mappings:
-                        </Text>
+                      <InlineStack gap="200">
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">Match by:</Text>
+                        <Text as="span" variant="bodyMd">{matchLabel}</Text>
+                      </InlineStack>
+                      <InlineStack gap="200">
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">Field mappings:</Text>
+                        <Text as="span" variant="bodyMd">{config.mappingsCount}</Text>
+                      </InlineStack>
+                      <InlineStack gap="200">
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">Linked products:</Text>
                         <Text as="span" variant="bodyMd">
-                          {config.mappingsCount}
+                          {syncedCount} / {products.length}
                         </Text>
                       </InlineStack>
                     </BlockStack>
-                    <InlineStack gap="300">
-                      <fetcher.Form method="post">
-                        <Button
-                          variant="primary"
-                          submit
-                          loading={isSyncing}
-                        >
-                          Sync Now
-                        </Button>
-                      </fetcher.Form>
-                      <Button
-                        variant="plain"
-                        onClick={() => navigate("/app/settings")}
-                      >
-                        Edit settings
-                      </Button>
-                    </InlineStack>
                   </BlockStack>
                 </Card>
               )}
 
               {syncResult && (
                 <Banner
-                  title={
-                    syncResult.errorCount === 0
-                      ? "Sync completed successfully"
-                      : "Sync completed with errors"
-                  }
+                  title={syncResult.errorCount === 0 ? "Sync completed" : "Sync completed with errors"}
                   tone={syncResult.errorCount === 0 ? "success" : "critical"}
                 >
                   <Text as="p" variant="bodyMd">
-                    {syncResult.updatedCount} products updated,{" "}
-                    {syncResult.skippedCount} skipped,{" "}
+                    {syncResult.updatedCount} updated, {syncResult.skippedCount} skipped,{" "}
                     {syncResult.errorCount} errors.
                   </Text>
                 </Banner>
@@ -187,32 +255,68 @@ export default function Index() {
                   <BlockStack gap="100">
                     {lastLog.status !== "running" && (
                       <Text as="p" variant="bodyMd">
-                        {lastLog.updatedCount} products updated,{" "}
-                        {lastLog.skippedCount} skipped,{" "}
+                        {lastLog.updatedCount} updated, {lastLog.skippedCount} skipped,{" "}
                         {lastLog.errorCount} errors.
                       </Text>
                     )}
                     {lastLog.completedAt && (
                       <Text as="p" variant="bodyMd" tone="subdued">
-                        Completed:{" "}
-                        {new Date(lastLog.completedAt).toLocaleString()}
-                      </Text>
-                    )}
-                    {lastLog.errorCount > 0 && lastLog.errorMessages && (
-                      <Text as="p" variant="bodyMd">
-                        {(() => {
-                          try {
-                            const msgs = JSON.parse(lastLog.errorMessages) as string[];
-                            return msgs.slice(0, 3).join(" | ");
-                          } catch {
-                            return lastLog.errorMessages;
-                          }
-                        })()}
+                        Completed: {new Date(lastLog.completedAt).toLocaleString()}
                       </Text>
                     )}
                   </BlockStack>
                 </Banner>
               )}
+
+              <Card padding="0">
+                <IndexTable
+                  resourceName={{ singular: "product", plural: "products" }}
+                  itemCount={products.length}
+                  headings={[
+                    { title: "Product" },
+                    { title: matchLabel },
+                    { title: "Price" },
+                    { title: "Sheet sync" },
+                  ]}
+                  selectable={false}
+                >
+                  {products.map((product, index) => (
+                    <IndexTable.Row
+                      id={product.id}
+                      key={product.id}
+                      position={index}
+                    >
+                      <IndexTable.Cell>
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">
+                          {product.title}
+                        </Text>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <Text as="span" variant="bodyMd" tone="subdued">
+                          {product.identifier || "—"}
+                        </Text>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <Text as="span" variant="bodyMd">
+                          {product.price ? `$${product.price}` : "—"}
+                        </Text>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        {product.synced ? (
+                          <Badge tone="success">Synced</Badge>
+                        ) : (
+                          <Tooltip content="This product's identifier was not found in the sheet. It will be updated from Shopify only.">
+                            <Badge tone="attention">Shopify only</Badge>
+                          </Tooltip>
+                        )}
+                      </IndexTable.Cell>
+                    </IndexTable.Row>
+                  ))}
+                </IndexTable>
+              </Card>
             </BlockStack>
           </Layout.Section>
         </Layout>
