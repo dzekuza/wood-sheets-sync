@@ -8,6 +8,8 @@ import {
   updateProductFields,
   updateVariantFields,
   createProduct,
+  attachProductImages,
+  upsertProductOption,
 } from "~/lib/shopify-graphql.server";
 import {
   createSyncLog,
@@ -21,6 +23,7 @@ const PRODUCT_FIELDS = new Set([
   "vendor",
   "product_type",
   "tags",
+  "status",
 ]);
 
 const VARIANT_FIELDS = new Set([
@@ -28,6 +31,19 @@ const VARIANT_FIELDS = new Set([
   "compare_at_price",
   "sku",
   "barcode",
+]);
+
+// image_1 … image_10
+const IMAGE_FIELDS = new Set(
+  Array.from({ length: 10 }, (_, i) => `image_${i + 1}`)
+);
+
+// option1_name, option1_values, option2_name, option2_values
+const OPTION_FIELDS = new Set([
+  "option1_name",
+  "option1_values",
+  "option2_name",
+  "option2_values",
 ]);
 
 function delay(ms: number): Promise<void> {
@@ -134,6 +150,7 @@ export async function runSync(
         vendor: string;
         productType: string;
         tags: string[];
+        status: string;
       }> = {};
 
       const variantPayload: Partial<{
@@ -142,11 +159,22 @@ export async function runSync(
         barcode: string;
       }> = {};
 
+      // Ordered image URLs (image_1 first, then image_2, …)
+      const imageUrls: (string | null)[] = Array(10).fill(null);
+
+      // Option data collected from mapped columns
+      const optionData: {
+        option1Name?: string;
+        option1Values?: string[];
+        option2Name?: string;
+        option2Values?: string[];
+      } = {};
+
       for (const mapping of config.mappings) {
         const colIndex = headerIndex.get(mapping.sheetColumn);
         if (colIndex === undefined) continue;
 
-        const rawValue = row[colIndex] ?? "";
+        const rawValue = (row[colIndex] ?? "").toString().trim();
 
         if (PRODUCT_FIELDS.has(mapping.shopifyField)) {
           switch (mapping.shopifyField) {
@@ -168,6 +196,12 @@ export async function runSync(
                 .map((t) => t.trim())
                 .filter((t: string) => Boolean(t));
               break;
+            case "status": {
+              const s = rawValue.toLowerCase();
+              productPayload.status =
+                s === "draft" || s === "archived" ? s : "active";
+              break;
+            }
           }
         } else if (VARIANT_FIELDS.has(mapping.shopifyField)) {
           switch (mapping.shopifyField) {
@@ -175,18 +209,47 @@ export async function runSync(
               variantPayload.price = rawValue;
               break;
             case "compare_at_price": {
-              const trimmed = rawValue.trim();
               variantPayload.compareAtPrice =
-                trimmed === "" || trimmed === "0" ? null : trimmed;
+                rawValue === "" || rawValue === "0" ? null : rawValue;
               break;
             }
             case "barcode":
               variantPayload.barcode = rawValue;
               break;
-            // "sku" field in mappings is informational; the SKU is already used for lookup
+            // "sku" is informational — already used for lookup
+          }
+        } else if (IMAGE_FIELDS.has(mapping.shopifyField)) {
+          // image_1 … image_10 → slot 0 … 9
+          const slot = parseInt(mapping.shopifyField.replace("image_", ""), 10) - 1;
+          if (rawValue.startsWith("http")) {
+            imageUrls[slot] = rawValue;
+          }
+        } else if (OPTION_FIELDS.has(mapping.shopifyField)) {
+          switch (mapping.shopifyField) {
+            case "option1_name":
+              optionData.option1Name = rawValue;
+              break;
+            case "option1_values":
+              optionData.option1Values = rawValue
+                .split(",")
+                .map((v) => v.trim())
+                .filter(Boolean);
+              break;
+            case "option2_name":
+              optionData.option2Name = rawValue;
+              break;
+            case "option2_values":
+              optionData.option2Values = rawValue
+                .split(",")
+                .map((v) => v.trim())
+                .filter(Boolean);
+              break;
           }
         }
       }
+
+      // Collect valid (non-null) image URLs in slot order
+      const validImageUrls = imageUrls.filter((u): u is string => u !== null);
 
       // Find the product/variant in Shopify using the configured match field
       let variant: { variantId: string; productId: string } | null = null;
@@ -218,6 +281,40 @@ export async function runSync(
           errorMessages.push(...result.errors.map((e) => `[create ${identifier}] ${e}`));
           errorCount++;
         } else {
+          // Attach images and options to the newly-created product
+          const newProductId = result.productId;
+
+          if (validImageUrls.length > 0) {
+            const imgErrors = await attachProductImages(
+              admin,
+              newProductId,
+              validImageUrls,
+              title
+            );
+            if (imgErrors.length > 0) {
+              errorMessages.push(...imgErrors);
+            }
+          }
+
+          if (optionData.option1Name && optionData.option1Values?.length) {
+            const optErrors = await upsertProductOption(
+              admin,
+              newProductId,
+              optionData.option1Name,
+              optionData.option1Values
+            );
+            if (optErrors.length > 0) errorMessages.push(...optErrors);
+          }
+          if (optionData.option2Name && optionData.option2Values?.length) {
+            const optErrors = await upsertProductOption(
+              admin,
+              newProductId,
+              optionData.option2Name,
+              optionData.option2Values
+            );
+            if (optErrors.length > 0) errorMessages.push(...optErrors);
+          }
+
           updatedCount++;
         }
 
@@ -248,6 +345,37 @@ export async function runSync(
           variantPayload
         );
         rowErrors.push(...variantErrors);
+      }
+
+      // Attach images (skips URLs already on the product)
+      if (validImageUrls.length > 0) {
+        const imgErrors = await attachProductImages(
+          admin,
+          variant.productId,
+          validImageUrls,
+          productPayload.title ?? ""
+        );
+        rowErrors.push(...imgErrors);
+      }
+
+      // Upsert variant options
+      if (optionData.option1Name && optionData.option1Values?.length) {
+        const optErrors = await upsertProductOption(
+          admin,
+          variant.productId,
+          optionData.option1Name,
+          optionData.option1Values
+        );
+        rowErrors.push(...optErrors);
+      }
+      if (optionData.option2Name && optionData.option2Values?.length) {
+        const optErrors = await upsertProductOption(
+          admin,
+          variant.productId,
+          optionData.option2Name,
+          optionData.option2Values
+        );
+        rowErrors.push(...optErrors);
       }
 
       if (rowErrors.length > 0) {

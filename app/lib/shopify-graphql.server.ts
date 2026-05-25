@@ -351,6 +351,252 @@ export async function updateVariantFields(
   return userErrors.map((e) => `[variant ${variantId}] ${e.message}`);
 }
 
+// ── Query: get existing product image URLs (to avoid duplicates) ──────────────
+
+const GET_PRODUCT_IMAGES = `#graphql
+  query GetProductImages($id: ID!) {
+    product(id: $id) {
+      media(first: 20) {
+        edges {
+          node {
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export async function getProductImageUrls(
+  admin: AdminApiContext,
+  productId: string
+): Promise<string[]> {
+  const response = await admin.graphql(GET_PRODUCT_IMAGES, {
+    variables: { id: productId },
+  });
+
+  const data = (await response.json()) as {
+    data?: {
+      product?: {
+        media: {
+          edges: Array<{ node: { image?: { url: string } } }>;
+        };
+      };
+    };
+  };
+
+  return (data.data?.product?.media.edges ?? [])
+    .map((e) => e.node.image?.url ?? "")
+    .filter(Boolean);
+}
+
+// ── Mutation: attach images to a product ──────────────────────────────────────
+
+const CREATE_PRODUCT_MEDIA = `#graphql
+  mutation productCreateMedia($media: [CreateMediaInput!]!, $productId: ID!) {
+    productCreateMedia(media: $media, productId: $productId) {
+      media {
+        alt
+        mediaContentType
+        status
+      }
+      mediaUserErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+/**
+ * Attach image URLs to a product. Skips URLs that the product already has
+ * (matched by URL substring to handle CDN rewrites).
+ * Returns an array of error strings (empty = success).
+ */
+export async function attachProductImages(
+  admin: AdminApiContext,
+  productId: string,
+  imageUrls: string[],
+  altText = ""
+): Promise<string[]> {
+  const valid = imageUrls.filter((u) => u.startsWith("http"));
+  if (valid.length === 0) return [];
+
+  // Fetch existing images and skip already-present ones
+  const existing = await getProductImageUrls(admin, productId);
+  const toAdd = valid.filter(
+    (url) => !existing.some((ex) => ex.includes(url) || url.includes(ex))
+  );
+  if (toAdd.length === 0) return [];
+
+  const media = toAdd.map((url) => ({
+    originalSource: url,
+    alt: altText,
+    mediaContentType: "IMAGE",
+  }));
+
+  const response = await admin.graphql(CREATE_PRODUCT_MEDIA, {
+    variables: { productId, media },
+  });
+
+  const data = (await response.json()) as {
+    data?: {
+      productCreateMedia?: {
+        mediaUserErrors: Array<{ field: string[]; message: string }>;
+      };
+    };
+  };
+
+  const errs = data.data?.productCreateMedia?.mediaUserErrors ?? [];
+  return errs.map((e) => `[image ${productId}] ${e.message}`);
+}
+
+// ── Mutation: create/replace variant options ──────────────────────────────────
+
+const GET_PRODUCT_OPTIONS = `#graphql
+  query GetProductOptions($id: ID!) {
+    product(id: $id) {
+      options {
+        id
+        name
+        values
+      }
+    }
+  }
+`;
+
+const CREATE_PRODUCT_OPTIONS = `#graphql
+  mutation productOptionsCreate($productId: ID!, $options: [OptionCreateInput!]!) {
+    productOptionsCreate(productId: $productId, options: $options) {
+      product {
+        id
+        options {
+          id
+          name
+          values
+        }
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+const UPDATE_PRODUCT_OPTION = `#graphql
+  mutation productOptionUpdate($productId: ID!, $option: OptionUpdateInput!, $variantStrategy: ProductOptionUpdateVariantStrategy) {
+    productOptionUpdate(productId: $productId, option: $option, variantStrategy: $variantStrategy) {
+      product {
+        id
+        options {
+          id
+          name
+          values
+        }
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+/**
+ * Ensure a product has the given option with the given values.
+ * - If the option doesn't exist yet → creates it with all values.
+ * - If it exists → updates it to include any missing values.
+ * Uses variantStrategy: LEAVE_AS_IS to avoid destroying existing variants.
+ * Returns an array of error strings.
+ */
+export async function upsertProductOption(
+  admin: AdminApiContext,
+  productId: string,
+  optionName: string,
+  optionValues: string[]
+): Promise<string[]> {
+  if (!optionName || optionValues.length === 0) return [];
+
+  // Fetch current options
+  const optRes = await admin.graphql(GET_PRODUCT_OPTIONS, {
+    variables: { id: productId },
+  });
+  const optData = (await optRes.json()) as {
+    data?: {
+      product?: {
+        options: Array<{ id: string; name: string; values: string[] }>;
+      };
+    };
+  };
+
+  const existing = optData.data?.product?.options ?? [];
+  const match = existing.find(
+    (o) => o.name.toLowerCase() === optionName.toLowerCase()
+  );
+
+  if (!match) {
+    // Create the option from scratch
+    const response = await admin.graphql(CREATE_PRODUCT_OPTIONS, {
+      variables: {
+        productId,
+        options: [
+          {
+            name: optionName,
+            values: optionValues.map((v) => ({ name: v })),
+          },
+        ],
+      },
+    });
+    const data = (await response.json()) as {
+      data?: {
+        productOptionsCreate?: {
+          userErrors: Array<{ field: string[]; message: string }>;
+        };
+      };
+    };
+    return (data.data?.productOptionsCreate?.userErrors ?? []).map(
+      (e) => `[option create ${optionName}] ${e.message}`
+    );
+  }
+
+  // Option exists — find values that need to be added
+  const existingValues = new Set(match.values.map((v) => v.toLowerCase()));
+  const newValues = optionValues.filter(
+    (v) => !existingValues.has(v.toLowerCase())
+  );
+  if (newValues.length === 0) return [];
+
+  const allValues = [...match.values, ...newValues];
+  const response = await admin.graphql(UPDATE_PRODUCT_OPTION, {
+    variables: {
+      productId,
+      option: {
+        id: match.id,
+        name: optionName,
+        values: allValues.map((v) => ({ name: v })),
+      },
+      variantStrategy: "LEAVE_AS_IS",
+    },
+  });
+  const data = (await response.json()) as {
+    data?: {
+      productOptionUpdate?: {
+        userErrors: Array<{ field: string[]; message: string }>;
+      };
+    };
+  };
+  return (data.data?.productOptionUpdate?.userErrors ?? []).map(
+    (e) => `[option update ${optionName}] ${e.message}`
+  );
+}
+
 // ── Mutation: create a new product with an initial variant ────────────────────
 
 const CREATE_PRODUCT = `#graphql
