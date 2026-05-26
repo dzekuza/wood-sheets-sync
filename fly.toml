@@ -9,6 +9,7 @@ primary_region = 'arn'
 [build]
 
 [env]
+  HOST = '0.0.0.0'
   PORT = '3000'
   SCOPES = 'write_products'
   SHOPIFY_API_KEY = 'ed208fa1e2de849d9609fe11690ad203'
