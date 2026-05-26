@@ -56,6 +56,9 @@ const LIST_PRODUCTS = `#graphql
           title
           handle
           status
+          featuredImage {
+            url
+          }
           variants(first: 1) {
             edges {
               node {
@@ -84,6 +87,7 @@ export type ShopifyProductRow = {
   sku: string;
   price: string;
   variantId: string;
+  image: string | null;
 };
 
 export async function listProducts(
@@ -109,6 +113,7 @@ export async function listProducts(
               title: string;
               handle: string;
               status: string;
+              featuredImage?: { url: string } | null;
               variants: {
                 edges: Array<{ node: { id: string; sku: string; price: string } }>;
               };
@@ -130,6 +135,7 @@ export async function listProducts(
         sku: variant?.sku ?? "",
         price: variant?.price ?? "",
         variantId: variant?.id ?? "",
+        image: node.featuredImage?.url ?? null,
       });
     }
 

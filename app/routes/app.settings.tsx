@@ -224,22 +224,26 @@ export default function Settings() {
               </Banner>
             )}
 
-            {/* Step 1: Sheet URL */}
+            {/* Step 1: Sheet URL & Tab */}
             <Card>
               <BlockStack gap="400">
-                <Text as="h2" variant="headingMd">
-                  Step 1: Connect your Google Sheet
-                </Text>
-                <Text as="p" variant="bodyMd" tone="subdued">
-                  Enter the URL of your public Google Sheet. Make sure the sheet
-                  is shared with "Anyone with the link can view".
-                </Text>
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingMd">
+                    Sheet URL &amp; Tab
+                  </Text>
+                  <Text as="p" variant="bodyMd" tone="subdued">
+                    Enter the URL of your public Google Sheet and the tab name
+                    to read from. Make sure the sheet is shared with "Anyone
+                    with the link can view".
+                  </Text>
+                </BlockStack>
                 <TextField
                   label="Google Sheet URL"
                   value={sheetUrl}
                   onChange={setSheetUrl}
                   placeholder="https://docs.google.com/spreadsheets/d/..."
                   autoComplete="off"
+                  helpText="Paste the full URL from your browser's address bar."
                 />
                 <TextField
                   label="Tab name"
@@ -247,7 +251,7 @@ export default function Settings() {
                   onChange={setSheetName}
                   placeholder="Sheet1"
                   autoComplete="off"
-                  helpText="The name of the tab/sheet to read from."
+                  helpText="The exact name of the tab at the bottom of your spreadsheet (e.g. Sheet1, Products)."
                 />
                 {headersFetcher.data?.error && (
                   <Banner title="Could not load columns" tone="critical">
@@ -272,13 +276,15 @@ export default function Settings() {
             {displayHeaders.length > 0 && (
               <Card>
                 <BlockStack gap="400">
+                  <BlockStack gap="100">
                   <Text as="h2" variant="headingMd">
-                    Step 2: Map columns to Shopify fields
+                    Column mapping
                   </Text>
                   <Text as="p" variant="bodyMd" tone="subdued">
                     Choose how to match sheet rows to existing Shopify products,
                     then map other columns to Shopify product fields.
                   </Text>
+                  </BlockStack>
 
                   <Select
                     label="Match type"

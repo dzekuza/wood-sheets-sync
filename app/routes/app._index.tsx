@@ -12,7 +12,7 @@ import {
   InlineStack,
   IndexTable,
   Badge,
-  Link,
+  Thumbnail,
   Tooltip,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
@@ -30,6 +30,7 @@ type ProductRow = {
   sku: string;
   price: string;
   status: string;
+  image: string | null;
   synced: boolean;
   identifier: string;
 };
@@ -200,6 +201,12 @@ export default function Index() {
                     </InlineStack>
 
                     <BlockStack gap="100">
+                      <InlineStack gap="200" blockAlign="center">
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">Sheet URL:</Text>
+                        <Text as="span" variant="bodyMd" tone="subdued" breakWord>
+                          {config.sheetUrl}
+                        </Text>
+                      </InlineStack>
                       <InlineStack gap="200">
                         <Text as="span" variant="bodyMd" fontWeight="semibold">Tab:</Text>
                         <Text as="span" variant="bodyMd">{config.sheetName}</Text>
@@ -273,7 +280,9 @@ export default function Index() {
                   resourceName={{ singular: "product", plural: "products" }}
                   itemCount={products.length}
                   headings={[
+                    { title: "" },
                     { title: "Product" },
+                    { title: "Status" },
                     { title: matchLabel },
                     { title: "Price" },
                     { title: "Sheet sync" },
@@ -287,9 +296,40 @@ export default function Index() {
                       position={index}
                     >
                       <IndexTable.Cell>
-                        <Text as="span" variant="bodyMd" fontWeight="semibold">
-                          {product.title}
-                        </Text>
+                        <Thumbnail
+                          source={product.image ?? ""}
+                          alt={product.title}
+                          size="small"
+                        />
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <BlockStack gap="050">
+                          <Text as="span" variant="bodyMd" fontWeight="semibold">
+                            {product.title}
+                          </Text>
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            {product.handle}
+                          </Text>
+                        </BlockStack>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <Badge
+                          tone={
+                            product.status === "ACTIVE"
+                              ? "success"
+                              : product.status === "DRAFT"
+                              ? "info"
+                              : "critical"
+                          }
+                        >
+                          {product.status === "ACTIVE"
+                            ? "Active"
+                            : product.status === "DRAFT"
+                            ? "Draft"
+                            : "Archived"}
+                        </Badge>
                       </IndexTable.Cell>
 
                       <IndexTable.Cell>
