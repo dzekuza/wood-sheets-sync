@@ -21,6 +21,7 @@ import prisma from "../db.server";
 import { runSync } from "../lib/shopify-sync.server";
 import { listProducts } from "../lib/shopify-graphql.server";
 import { fetchSheetRows } from "../lib/google-sheets.server";
+import { cancelRunningSyncLogs } from "../lib/sync-logger.server";
 import type { SyncLog } from "../lib/sync-logger.server";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -176,7 +177,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       create: { shop },
       update: { createdAt: new Date() },
     });
-    return json({ cancelled: true });
+    const stoppedLogs = await cancelRunningSyncLogs(shop);
+    return json({ cancelled: true, stoppedLogs });
   }
 
   const result = await runSync(shop, "manual", admin);
@@ -219,7 +221,7 @@ export default function Index() {
   const fetcher = useFetcher<typeof action>();
   const navigate = useNavigate();
 
-  const cancelFetcher = useFetcher<{ cancelled?: boolean }>();
+  const cancelFetcher = useFetcher<{ cancelled?: boolean; stoppedLogs?: number }>();
   const isSyncing = fetcher.state !== "idle" && fetcher.formMethod === "POST";
   const isCancelling = cancelFetcher.state !== "idle";
   const syncResult = fetcher.data;

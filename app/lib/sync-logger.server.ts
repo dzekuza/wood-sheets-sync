@@ -56,6 +56,23 @@ export async function updateSyncLog(
   });
 }
 
+export async function cancelRunningSyncLogs(shop: string): Promise<number> {
+  const result = await prisma.syncLog.updateMany({
+    where: {
+      shop,
+      status: "running",
+      completedAt: null,
+    },
+    data: {
+      status: "partial",
+      errorMessages: JSON.stringify(["Sync stopped by user."]),
+      completedAt: new Date(),
+    },
+  });
+
+  return result.count;
+}
+
 /**
  * Return the most recent N sync logs for a shop, newest first.
  */
