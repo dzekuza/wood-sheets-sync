@@ -269,7 +269,7 @@ export async function updateProductFields(
 
   if (fields.title !== undefined) input.title = fields.title;
   if (fields.handle !== undefined) input.handle = fields.handle;
-  if (fields.bodyHtml !== undefined) input.bodyHtml = fields.bodyHtml;
+  if (fields.bodyHtml !== undefined) input.descriptionHtml = fields.bodyHtml;
   if (fields.vendor !== undefined) input.vendor = fields.vendor;
   if (fields.productType !== undefined) input.productType = fields.productType;
   if (fields.tags !== undefined) input.tags = fields.tags;
@@ -279,12 +279,17 @@ export async function updateProductFields(
   });
 
   const data = (await response.json()) as {
+    errors?: Array<{ message: string }>;
     data?: {
       productUpdate?: {
         userErrors: Array<{ field: string[]; message: string }>;
       };
     };
   };
+
+  if (data.errors?.length) {
+    return data.errors.map((e) => `[product ${productId}] ${e.message}`);
+  }
 
   const userErrors = data.data?.productUpdate?.userErrors ?? [];
   return userErrors.map((e) => `[product ${productId}] ${e.message}`);
@@ -325,7 +330,7 @@ export async function updateVariantFields(
 ): Promise<string[]> {
   const variantInput: Record<string, unknown> = { id: variantId };
 
-  if (fields.sku !== undefined) variantInput.sku = fields.sku;
+  if (fields.sku !== undefined) variantInput.inventoryItem = { sku: fields.sku };
   if (fields.price !== undefined) variantInput.price = fields.price;
   if (fields.compareAtPrice !== undefined)
     variantInput.compareAtPrice =
@@ -342,12 +347,17 @@ export async function updateVariantFields(
   });
 
   const data = (await response.json()) as {
+    errors?: Array<{ message: string }>;
     data?: {
       productVariantsBulkUpdate?: {
         userErrors: Array<{ field: string[]; message: string }>;
       };
     };
   };
+
+  if (data.errors?.length) {
+    return data.errors.map((e) => `[variant ${variantId}] ${e.message}`);
+  }
 
   const userErrors = data.data?.productVariantsBulkUpdate?.userErrors ?? [];
   return userErrors.map((e) => `[variant ${variantId}] ${e.message}`);
@@ -652,6 +662,7 @@ export async function createProduct(
   });
 
   const data = (await response.json()) as {
+    errors?: Array<{ message: string }>;
     data?: {
       productCreate?: {
         product?: {
@@ -662,6 +673,10 @@ export async function createProduct(
       };
     };
   };
+
+  if (data.errors?.length) {
+    return { errors: data.errors.map((e) => e.message) };
+  }
 
   const userErrors = data.data?.productCreate?.userErrors ?? [];
   if (userErrors.length > 0) {
@@ -677,12 +692,6 @@ export async function createProduct(
   // Step 2: update the default variant with price/SKU/barcode
   const hasVariantFields = fields.sku || fields.price || fields.compareAtPrice !== undefined || fields.barcode;
   if (variantId && hasVariantFields) {
-    const variantInput: Record<string, unknown> = { id: variantId };
-    if (fields.sku) variantInput.sku = fields.sku;
-    if (fields.price) variantInput.price = fields.price;
-    if (fields.compareAtPrice !== undefined) variantInput.compareAtPrice = fields.compareAtPrice ?? null;
-    if (fields.barcode) variantInput.barcode = fields.barcode;
-
     const variantErrors = await updateVariantFields(
       admin,
       variantId,
@@ -831,7 +840,7 @@ export async function syncVariantCombinations(
     }
     const v: Record<string, unknown> = { optionValues };
     const detail = detailByCombo.get(`${c.o1}|||${c.o2 ?? ""}`);
-    if (detail?.sku) v.sku = detail.sku;
+    if (detail?.sku) v.inventoryItem = { sku: detail.sku };
     if (detail?.price ?? price) v.price = detail?.price ?? price;
     if (detail?.compareAtPrice !== undefined) {
       v.compareAtPrice =
@@ -848,12 +857,17 @@ export async function syncVariantCombinations(
   });
 
   const data = (await response.json()) as {
+    errors?: Array<{ message: string }>;
     data?: {
       productVariantsBulkCreate?: {
         userErrors: Array<{ field: string[]; message: string }>;
       };
     };
   };
+
+  if (data.errors?.length) {
+    return data.errors.map((e) => `[variant create] ${e.message}`);
+  }
 
   return (data.data?.productVariantsBulkCreate?.userErrors ?? []).map(
     (e) => `[variant create] ${e.message}`
