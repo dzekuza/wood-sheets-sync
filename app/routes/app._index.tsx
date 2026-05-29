@@ -171,6 +171,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function adminProductUrl(shop: string, gid: string): string {
+  const storeHandle = shop.replace(".myshopify.com", "");
+  const numericId = gid.split("/").pop() ?? "";
+  return `https://admin.shopify.com/store/${storeHandle}/products/${numericId}`;
+}
+
 const MATCH_FIELD_LABEL: Record<string, string> = {
   sku: "SKU",
   title: "Title",
@@ -194,7 +200,7 @@ const FIELD_LABEL: Record<string, string> = {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Index() {
-  const { config, lastLog, products, lastSyncResults, sheetError } =
+  const { shop, config, lastLog, products, lastSyncResults, sheetError } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const navigate = useNavigate();
@@ -354,7 +360,12 @@ export default function Index() {
                     const updatedFields = new Set(result?.syncedFields ?? []);
 
                     return (
-                      <IndexTable.Row id={product.id} key={product.id} position={index}>
+                      <IndexTable.Row
+                        id={product.id}
+                        key={product.id}
+                        position={index}
+                        onClick={() => window.open(adminProductUrl(shop, product.id), "_top")}
+                      >
                         {/* Thumbnail */}
                         <IndexTable.Cell>
                           <Thumbnail
