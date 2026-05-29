@@ -20,7 +20,6 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { extractSpreadsheetId, SHOPIFY_FIELDS } from "../lib/validators";
-import { fetchSheetHeaders } from "../lib/google-sheets.server";
 
 type FieldMapping = {
   sheetColumn: string;
@@ -36,7 +35,6 @@ type LoaderData = {
     updateOnly: boolean;
     mappings: FieldMapping[];
   } | null;
-  sheetHeaders: string[];
 };
 
 // ── Auto-detect Shopify field from column name ────────────────────────────────
@@ -74,15 +72,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     include: { mappings: true },
   });
 
-  let sheetHeaders: string[] = [];
-  if (config) {
-    try {
-      sheetHeaders = await fetchSheetHeaders(config.spreadsheetId, config.sheetName);
-    } catch {
-      // non-fatal — show existing mapped columns as fallback
-    }
-  }
-
   return json<LoaderData>({
     config: config
       ? {
@@ -97,7 +86,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           })),
         }
       : null,
-    sheetHeaders,
   });
 };
 
@@ -177,7 +165,7 @@ const SHOPIFY_FIELD_OPTIONS = [
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Settings() {
-  const { config, sheetHeaders: loaderHeaders } = useLoaderData<typeof loader>();
+  const { config } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
   const [sheetUrl, setSheetUrl] = useState(config?.sheetUrl ?? "");
@@ -189,8 +177,20 @@ export default function Settings() {
   const headersFetcher = useFetcher<{ headers?: string[]; error?: string }>();
   const fetchedHeaders: string[] = headersFetcher.data?.headers ?? [];
 
-  // Use freshly fetched headers, or fall back to loader headers (loaded server-side)
-  const displayHeaders = fetchedHeaders.length > 0 ? fetchedHeaders : loaderHeaders;
+  // Fallback: show previously-mapped column names while fresh headers load
+  const savedColumns = config?.mappings.map((m) => m.sheetColumn) ?? [];
+  const displayHeaders = fetchedHeaders.length > 0 ? fetchedHeaders : savedColumns;
+
+  // Auto-fetch headers on mount if config already exists
+  useEffect(() => {
+    if (config?.sheetUrl && config?.sheetName && headersFetcher.state === "idle" && fetchedHeaders.length === 0) {
+      headersFetcher.submit(
+        { sheetUrl: config.sheetUrl, sheetName: config.sheetName },
+        { method: "POST", action: "/api/sheet-headers", encType: "application/json" },
+      );
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Mapping state: column → shopify field
   const [mappings, setMappings] = useState<Record<string, string>>(() => {
