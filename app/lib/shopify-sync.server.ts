@@ -64,6 +64,18 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function splitImageUrls(value: string): string[] {
+  return value
+    .split(/[|,]/)
+    .map((url) => url.trim())
+    .filter((url) => url.startsWith("http"));
+}
+
+function getCell(row: string[], headerIndex: Map<string, number>, header: string): string {
+  const index = headerIndex.get(header);
+  return index === undefined ? "" : (row[index] ?? "").toString().trim();
+}
+
 async function recordProductResult(
   logId: string,
   shop: string,
@@ -198,6 +210,7 @@ export async function runSync(
       }
 
       const identifier = row[identifierColumnIndex]?.trim() ?? "";
+      const rowHandle = getCell(row, headerIndex, "Handle");
 
       if (!identifier) {
         skippedCount++;
@@ -250,6 +263,7 @@ export async function runSync(
         const rawValue = (row[colIndex] ?? "").toString().trim();
 
         if (rawValue) syncedFields.push(mapping.shopifyField);
+        if (!rawValue && PRODUCT_FIELDS.has(mapping.shopifyField)) continue;
 
         if (PRODUCT_FIELDS.has(mapping.shopifyField)) {
           switch (mapping.shopifyField) {
@@ -301,10 +315,9 @@ export async function runSync(
           }
         } else if (IMAGE_FIELDS.has(mapping.shopifyField)) {
           if (mapping.shopifyField === "images") {
-            // Pipe-separated list: "url1|url2|url3"
-            rawValue.split("|").forEach((url, i) => {
-              const u = url.trim();
-              if (u.startsWith("http") && i < 10) imageUrls[i] = u;
+            // Supports pipe or comma-separated lists: "url1|url2" or "url1,url2".
+            splitImageUrls(rawValue).forEach((url, i) => {
+              if (i < 10) imageUrls[i] = url;
             });
           } else {
             // image_1 … image_10 → slot 0 … 9
@@ -363,6 +376,12 @@ export async function runSync(
       } else {
         variant = await findVariantBySku(admin, identifier);
       }
+      if (!variant && rowHandle) {
+        variant = await findProductByHandle(admin, rowHandle);
+      }
+      if (!variant && productPayload.title) {
+        variant = await findProductByTitle(admin, productPayload.title);
+      }
 
       if (!variant) {
         if (config.updateOnly) {
@@ -375,7 +394,8 @@ export async function runSync(
         const result = await createProduct(admin, {
           title,
           handle:
-            productPayload.handle ??
+            productPayload.handle ||
+            rowHandle ||
             (matchField === "handle" ? identifier : undefined),
           bodyHtml: productPayload.bodyHtml,
           vendor: productPayload.vendor,
@@ -474,7 +494,10 @@ export async function runSync(
 
       // Apply variant-level updates across ALL variants (not just the default one)
       const hasVariantFields = Object.keys(variantPayload).length > 0;
-      if (hasVariantFields) {
+      const isShopifyCsvVariantRow =
+        Boolean(rowHandle) &&
+        (headerIndex.has("Option1 Value") || headerIndex.has("Option2 Value"));
+      if (hasVariantFields && !isShopifyCsvVariantRow) {
         const variantErrors = await updateAllVariantsFields(
           admin,
           variant.productId,
@@ -484,10 +507,16 @@ export async function runSync(
       }
 
       // Apply per-variant price — updates ONLY the specific variant matched by SKU
-      const hasVariantSpecificPrice = Object.keys(variantSpecificPrice).length > 0;
+      const rowVariantPrice =
+        variantSpecificPrice.price ?? (isShopifyCsvVariantRow ? variantPayload.price : undefined);
+      const rowVariantCompareAtPrice =
+        variantSpecificPrice.compareAtPrice ??
+        (isShopifyCsvVariantRow ? variantPayload.compareAtPrice : undefined);
+      const hasVariantSpecificPrice =
+        rowVariantPrice !== undefined || rowVariantCompareAtPrice !== undefined;
       const hasRowVariantFields = hasVariantSpecificPrice || hasMappedVariantSku;
       if (hasRowVariantFields) {
-        if (matchField !== "sku") {
+        if (isShopifyCsvVariantRow || matchField !== "sku") {
           const option1Value = optionData.option1Values?.[0];
           const option2Value = optionData.option2Values?.[0];
           if (!optionData.option1Name || !option1Value) {
@@ -511,8 +540,8 @@ export async function runSync(
                 variant.productId,
                 {
                   sku: variantSku,
-                  price: variantSpecificPrice.price,
-                  compareAtPrice: variantSpecificPrice.compareAtPrice,
+                  price: rowVariantPrice,
+                  compareAtPrice: rowVariantCompareAtPrice,
                 }
               );
               rowErrors.push(...specificErrors);
@@ -523,7 +552,11 @@ export async function runSync(
             admin,
             variant.variantId,
             variant.productId,
-            variantSpecificPrice
+            {
+              sku: variantSku,
+              price: rowVariantPrice,
+              compareAtPrice: rowVariantCompareAtPrice,
+            }
           );
           rowErrors.push(...specificErrors);
         }
@@ -573,10 +606,10 @@ export async function runSync(
                 option1Value: optionData.option1Values[0],
                 option2Value: optionData.option2Values?.[0],
                 sku: variantSku,
-                price: variantPayload.price ?? variantSpecificPrice.price,
+                price: variantPayload.price ?? rowVariantPrice,
                 compareAtPrice:
                   variantPayload.compareAtPrice ??
-                  variantSpecificPrice.compareAtPrice,
+                  rowVariantCompareAtPrice,
                 barcode: variantPayload.barcode,
               }]
             : []

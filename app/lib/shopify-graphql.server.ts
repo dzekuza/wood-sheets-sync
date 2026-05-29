@@ -688,6 +688,7 @@ export async function createProduct(
       variantId,
       productId,
       {
+        sku: fields.sku,
         price: fields.price,
         compareAtPrice: fields.compareAtPrice,
         barcode: fields.barcode,
