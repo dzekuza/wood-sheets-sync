@@ -21,6 +21,7 @@ model SheetConfig {
   sheetName     String         @default("Sheet1")
   skuColumn     String?
   matchField    String         @default("sku")
+  updateOnly    Boolean        @default(false)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   mappings      FieldMapping[]

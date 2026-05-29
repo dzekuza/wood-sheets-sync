@@ -10,6 +10,7 @@ import {
   createProduct,
   attachProductImages,
   upsertProductOption,
+  syncVariantCombinations,
 } from "~/lib/shopify-graphql.server";
 import {
   createSyncLog,
@@ -302,6 +303,10 @@ export async function runSync(
       }
 
       if (!variant) {
+        if (config.updateOnly) {
+          skippedCount++;
+          continue;
+        }
         // No existing product — create one
         const title = productPayload.title ?? identifier;
         const sku = matchField === "sku" ? identifier : undefined;
@@ -354,6 +359,18 @@ export async function runSync(
               optionData.option2Values
             );
             if (optErrors.length > 0) errorMessages.push(...optErrors);
+          }
+          if (optionData.option1Name && optionData.option1Values?.length) {
+            const varErrors = await syncVariantCombinations(
+              admin,
+              newProductId,
+              optionData.option1Name,
+              optionData.option1Values,
+              optionData.option2Name,
+              optionData.option2Values,
+              variantPayload.price
+            );
+            if (varErrors.length > 0) errorMessages.push(...varErrors);
           }
 
           await recordProductResult(logId, shop, newProductId, title, "", "updated", syncedFields);
@@ -418,6 +435,18 @@ export async function runSync(
           optionData.option2Values
         );
         rowErrors.push(...optErrors);
+      }
+      if (optionData.option1Name && optionData.option1Values?.length) {
+        const varErrors = await syncVariantCombinations(
+          admin,
+          variant.productId,
+          optionData.option1Name,
+          optionData.option1Values,
+          optionData.option2Name,
+          optionData.option2Values,
+          variantPayload.price
+        );
+        rowErrors.push(...varErrors);
       }
 
       if (rowErrors.length > 0) {

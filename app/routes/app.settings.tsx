@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Page,
   Layout,
@@ -14,11 +14,13 @@ import {
   InlineStack,
   Banner,
   Divider,
+  Checkbox,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { extractSpreadsheetId, SHOPIFY_FIELDS } from "../lib/validators";
+import { fetchSheetHeaders } from "../lib/google-sheets.server";
 
 type FieldMapping = {
   sheetColumn: string;
@@ -31,9 +33,37 @@ type LoaderData = {
     sheetName: string;
     skuColumn: string | null;
     matchField: string;
+    updateOnly: boolean;
     mappings: FieldMapping[];
   } | null;
+  sheetHeaders: string[];
 };
+
+// ── Auto-detect Shopify field from column name ────────────────────────────────
+
+const COLUMN_ALIASES: Record<string, string> = {
+  description: "body_html",
+  "body html": "body_html",
+  "product description": "body_html",
+  "compare at price": "compare_at_price",
+  "compare_at_price": "compare_at_price",
+  "product type": "product_type",
+  "product_type": "product_type",
+  "image url": "images",
+  "image urls": "images",
+  "image src": "images",
+  "image srcs": "images",
+};
+
+function autoDetectMapping(col: string): string {
+  const normalized = col.toLowerCase().trim();
+  for (const field of SHOPIFY_FIELDS) {
+    if (normalized === field.value) return field.value;
+  }
+  return COLUMN_ALIASES[normalized] ?? "__skip__";
+}
+
+// ── Loader ────────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -44,6 +74,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     include: { mappings: true },
   });
 
+  let sheetHeaders: string[] = [];
+  if (config) {
+    try {
+      sheetHeaders = await fetchSheetHeaders(config.spreadsheetId, config.sheetName);
+    } catch {
+      // non-fatal — show existing mapped columns as fallback
+    }
+  }
+
   return json<LoaderData>({
     config: config
       ? {
@@ -51,14 +90,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           sheetName: config.sheetName,
           skuColumn: config.skuColumn,
           matchField: config.matchField ?? "sku",
+          updateOnly: config.updateOnly ?? false,
           mappings: config.mappings.map((m) => ({
             sheetColumn: m.sheetColumn,
             shopifyField: m.shopifyField,
           })),
         }
       : null,
+    sheetHeaders,
   });
 };
+
+// ── Action ────────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -69,6 +112,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const sheetName = (formData.get("sheetName") as string) || "Sheet1";
   const skuColumn = formData.get("skuColumn") as string;
   const matchField = (formData.get("matchField") as string) || "sku";
+  const updateOnly = formData.get("updateOnly") === "true";
 
   if (!sheetUrl || !skuColumn) {
     return json({ error: "Sheet URL and identifier column are required." }, { status: 400 });
@@ -81,7 +125,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ error: (e as Error).message }, { status: 400 });
   }
 
-  // Collect field mappings from form data
   const mappings: FieldMapping[] = [];
   for (const [key, value] of formData.entries()) {
     if (key.startsWith("field_mapping_") && value && value !== "__skip__") {
@@ -90,29 +133,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  // Upsert SheetConfig
   const existing = await prisma.sheetConfig.findFirst({ where: { shop } });
 
   let configId: string;
   if (existing) {
     await prisma.sheetConfig.update({
       where: { id: existing.id },
-      data: { sheetUrl, sheetName, skuColumn, spreadsheetId, matchField },
+      data: { sheetUrl, sheetName, skuColumn, spreadsheetId, matchField, updateOnly },
     });
     configId = existing.id;
   } else {
     const created = await prisma.sheetConfig.create({
-      data: { shop, sheetUrl, sheetName, skuColumn, spreadsheetId, matchField },
+      data: { shop, sheetUrl, sheetName, skuColumn, spreadsheetId, matchField, updateOnly },
     });
     configId = created.id;
   }
 
-  // Deduplicate by shopifyField — if user maps two columns to the same field, last one wins
   const uniqueMappings = Array.from(
     new Map(mappings.map((m) => [m.shopifyField, m])).values()
   );
 
-  // Replace field mappings
   await prisma.fieldMapping.deleteMany({ where: { sheetConfigId: configId } });
   if (uniqueMappings.length > 0) {
     await prisma.fieldMapping.createMany({
@@ -127,32 +167,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return json({ success: true });
 };
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
 const SHOPIFY_FIELD_OPTIONS = [
   { label: "— skip —", value: "__skip__" },
   ...SHOPIFY_FIELDS.map((f) => ({ label: f.label, value: f.value })),
 ];
 
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function Settings() {
-  const { config } = useLoaderData<typeof loader>();
+  const { config, sheetHeaders: loaderHeaders } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
-  // Sheet URL form state
   const [sheetUrl, setSheetUrl] = useState(config?.sheetUrl ?? "");
   const [sheetName, setSheetName] = useState(config?.sheetName ?? "Sheet1");
-
-  // Headers fetcher
-  const headersFetcher = useFetcher<{ headers?: string[]; error?: string }>();
-  const headers: string[] = headersFetcher.data?.headers ?? [];
-
-  // Already-loaded headers from existing config
-  const initialHeaders = config?.mappings.map((m) => m.sheetColumn) ?? [];
-  const displayHeaders = headers.length > 0 ? headers : initialHeaders;
-
-  // Identifier column + match type
-  const [skuColumn, setSkuColumn] = useState(config?.skuColumn ?? "");
   const [matchField, setMatchField] = useState(config?.matchField ?? "sku");
+  const [skuColumn, setSkuColumn] = useState(config?.skuColumn ?? "");
+  const [updateOnly, setUpdateOnly] = useState(config?.updateOnly ?? false);
 
-  // Mapping state: column name → shopify field
+  const headersFetcher = useFetcher<{ headers?: string[]; error?: string }>();
+  const fetchedHeaders: string[] = headersFetcher.data?.headers ?? [];
+
+  // Use freshly fetched headers, or fall back to loader headers (loaded server-side)
+  const displayHeaders = fetchedHeaders.length > 0 ? fetchedHeaders : loaderHeaders;
+
+  // Mapping state: column → shopify field
   const [mappings, setMappings] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const m of config?.mappings ?? []) {
@@ -161,7 +201,31 @@ export default function Settings() {
     return initial;
   });
 
-  // Save form fetcher
+  // Auto-detect mappings when headers become available
+  useEffect(() => {
+    if (displayHeaders.length === 0) return;
+    setMappings((prev) => {
+      const next = { ...prev };
+      for (const col of displayHeaders) {
+        if (!next[col] || next[col] === "__skip__") {
+          const detected = autoDetectMapping(col);
+          if (detected !== "__skip__") next[col] = detected;
+        }
+      }
+      return next;
+    });
+    // Also auto-set identifier column if not set
+    setSkuColumn((prev) => {
+      if (prev) return prev;
+      // Look for a column that maps to 'sku' or 'title'
+      for (const col of displayHeaders) {
+        const det = autoDetectMapping(col);
+        if (det === "sku" || det === "title") return col;
+      }
+      return prev;
+    });
+  }, [displayHeaders.join(",")]);
+
   const saveFetcher = useFetcher<{ success?: boolean; error?: string }>();
   const isSaving = saveFetcher.state !== "idle";
   const saveSuccess = saveFetcher.data?.success;
@@ -170,11 +234,7 @@ export default function Settings() {
   function loadColumns() {
     headersFetcher.submit(
       { sheetUrl, sheetName },
-      {
-        method: "POST",
-        action: "/api/sheet-headers",
-        encType: "application/json",
-      },
+      { method: "POST", action: "/api/sheet-headers", encType: "application/json" },
     );
   }
 
@@ -188,6 +248,7 @@ export default function Settings() {
     formData.append("sheetName", sheetName);
     formData.append("skuColumn", skuColumn);
     formData.append("matchField", matchField);
+    formData.append("updateOnly", String(updateOnly));
     for (const [column, field] of Object.entries(mappings)) {
       formData.append(`field_mapping_${column}`, field);
     }
@@ -195,12 +256,11 @@ export default function Settings() {
   }
 
   const skuOptions = [
-    { label: "— select SKU column —", value: "" },
+    { label: "— select identifier column —", value: "" },
     ...displayHeaders.map((h) => ({ label: h, value: h })),
   ];
 
-  const isLoadingHeaders =
-    headersFetcher.state !== "idle";
+  const isLoadingHeaders = headersFetcher.state !== "idle";
 
   return (
     <Page
@@ -224,17 +284,14 @@ export default function Settings() {
               </Banner>
             )}
 
-            {/* Step 1: Sheet URL & Tab */}
+            {/* Sheet URL & Tab */}
             <Card>
               <BlockStack gap="400">
                 <BlockStack gap="100">
-                  <Text as="h2" variant="headingMd">
-                    Sheet URL &amp; Tab
-                  </Text>
+                  <Text as="h2" variant="headingMd">Sheet URL &amp; Tab</Text>
                   <Text as="p" variant="bodyMd" tone="subdued">
-                    Enter the URL of your public Google Sheet and the tab name
-                    to read from. Make sure the sheet is shared with "Anyone
-                    with the link can view".
+                    Paste your Google Sheet URL and tab name. Make sure the
+                    sheet is shared as "Anyone with the link can view".
                   </Text>
                 </BlockStack>
                 <TextField
@@ -251,39 +308,31 @@ export default function Settings() {
                   onChange={setSheetName}
                   placeholder="Sheet1"
                   autoComplete="off"
-                  helpText="The exact name of the tab at the bottom of your spreadsheet (e.g. Sheet1, Products)."
+                  helpText="The exact tab name at the bottom of your spreadsheet."
                 />
                 {headersFetcher.data?.error && (
                   <Banner title="Could not load columns" tone="critical">
-                    <Text as="p" variant="bodyMd">
-                      {headersFetcher.data.error}
-                    </Text>
+                    <Text as="p" variant="bodyMd">{headersFetcher.data.error}</Text>
                   </Banner>
                 )}
                 <InlineStack>
-                  <Button
-                    onClick={loadColumns}
-                    loading={isLoadingHeaders}
-                    disabled={!sheetUrl}
-                  >
-                    Load columns
+                  <Button onClick={loadColumns} loading={isLoadingHeaders} disabled={!sheetUrl}>
+                    {displayHeaders.length > 0 ? "Reload columns" : "Load columns"}
                   </Button>
                 </InlineStack>
               </BlockStack>
             </Card>
 
-            {/* Step 2: Column mapping */}
+            {/* Column mapping */}
             {displayHeaders.length > 0 && (
               <Card>
                 <BlockStack gap="400">
                   <BlockStack gap="100">
-                  <Text as="h2" variant="headingMd">
-                    Column mapping
-                  </Text>
-                  <Text as="p" variant="bodyMd" tone="subdued">
-                    Choose how to match sheet rows to existing Shopify products,
-                    then map other columns to Shopify product fields.
-                  </Text>
+                    <Text as="h2" variant="headingMd">Column mapping</Text>
+                    <Text as="p" variant="bodyMd" tone="subdued">
+                      Columns have been auto-mapped based on their names. Adjust
+                      any that are incorrect, then save.
+                    </Text>
                   </BlockStack>
 
                   <Select
@@ -295,7 +344,7 @@ export default function Settings() {
                     ]}
                     value={matchField}
                     onChange={setMatchField}
-                    helpText="How to look up existing products in Shopify. Use 'Variant SKU' if your products have SKUs set; 'Product title' or 'Product handle' to match existing products by those fields."
+                    helpText="How to find existing Shopify products. Use 'Product title' if products were imported without SKUs."
                   />
 
                   <Select
@@ -305,18 +354,23 @@ export default function Settings() {
                     onChange={setSkuColumn}
                     helpText={
                       matchField === "sku"
-                        ? "The sheet column whose value matches the variant SKU in Shopify."
+                        ? "Sheet column whose value matches the variant SKU in Shopify."
                         : matchField === "title"
-                        ? "The sheet column whose value matches the product title in Shopify."
-                        : "The sheet column whose value matches the product handle (URL slug) in Shopify."
+                        ? "Sheet column whose value matches the product title in Shopify."
+                        : "Sheet column whose value matches the product handle (URL slug)."
                     }
+                  />
+
+                  <Checkbox
+                    label="Update only — don't create new products"
+                    helpText="When enabled, rows with no matching Shopify product are skipped instead of creating a new product."
+                    checked={updateOnly}
+                    onChange={setUpdateOnly}
                   />
 
                   <Divider />
 
-                  <Text as="h3" variant="headingSm">
-                    Field mappings
-                  </Text>
+                  <Text as="h3" variant="headingSm">Field mappings</Text>
 
                   <BlockStack gap="300">
                     {displayHeaders.map((col) => (

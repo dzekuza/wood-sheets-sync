@@ -366,14 +366,14 @@ export default function Index() {
 
                         {/* Product title + handle */}
                         <IndexTable.Cell>
-                          <BlockStack gap="050">
-                            <Text as="span" variant="bodyMd" fontWeight="semibold">
+                          <div style={{ maxWidth: 280, overflow: "hidden" }}>
+                            <Text as="p" variant="bodyMd" fontWeight="semibold" truncate>
                               {product.title}
                             </Text>
-                            <Text as="span" variant="bodySm" tone="subdued">
+                            <Text as="p" variant="bodySm" tone="subdued" truncate>
                               {product.handle}
                             </Text>
-                          </BlockStack>
+                          </div>
                         </IndexTable.Cell>
 
                         {/* Active/Draft/Archived */}

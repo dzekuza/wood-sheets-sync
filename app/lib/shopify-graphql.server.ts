@@ -701,3 +701,137 @@ export async function createProduct(
 
   return { productId, variantId };
 }
+
+// ── Mutation: bulk-create variant combinations ────────────────────────────────
+
+const GET_PRODUCT_VARIANTS = `#graphql
+  query GetProductVariants($id: ID!) {
+    product(id: $id) {
+      variants(first: 100) {
+        edges {
+          node {
+            id
+            selectedOptions {
+              name
+              value
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const CREATE_VARIANTS_BULK = `#graphql
+  mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkCreate(productId: $productId, variants: $variants) {
+      productVariants {
+        id
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const MAX_SHOPIFY_VARIANTS = 100;
+
+/**
+ * Ensures all desired variant combinations exist on the product.
+ * Caps at 100 total variants (Shopify's hard limit).
+ * Only creates combinations that are missing — skips existing ones.
+ */
+export async function syncVariantCombinations(
+  admin: AdminApiContext,
+  productId: string,
+  option1Name: string,
+  option1Values: string[],
+  option2Name: string | undefined,
+  option2Values: string[] | undefined,
+  price: string | undefined
+): Promise<string[]> {
+  type Combo = { o1: string; o2?: string };
+  const desired: Combo[] = [];
+
+  if (option2Name && option2Values?.length) {
+    outer: for (const v1 of option1Values) {
+      for (const v2 of option2Values) {
+        if (desired.length >= MAX_SHOPIFY_VARIANTS) break outer;
+        desired.push({ o1: v1, o2: v2 });
+      }
+    }
+  } else {
+    for (const v1 of option1Values.slice(0, MAX_SHOPIFY_VARIANTS)) {
+      desired.push({ o1: v1 });
+    }
+  }
+
+  // Fetch existing variants
+  const varRes = await admin.graphql(GET_PRODUCT_VARIANTS, {
+    variables: { id: productId },
+  });
+  const varData = (await varRes.json()) as {
+    data?: {
+      product?: {
+        variants: {
+          edges: Array<{
+            node: {
+              id: string;
+              selectedOptions: Array<{ name: string; value: string }>;
+            };
+          }>;
+        };
+      };
+    };
+  };
+
+  const existingKeys = new Set(
+    (varData.data?.product?.variants.edges ?? []).map(({ node }) => {
+      const o1 =
+        node.selectedOptions.find(
+          (o) => o.name.toLowerCase() === option1Name.toLowerCase()
+        )?.value ?? "";
+      const o2 = option2Name
+        ? node.selectedOptions.find(
+            (o) => o.name.toLowerCase() === option2Name.toLowerCase()
+          )?.value ?? ""
+        : "";
+      return `${o1}|||${o2}`;
+    })
+  );
+
+  const toCreate = desired.filter(
+    (c) => !existingKeys.has(`${c.o1}|||${c.o2 ?? ""}`)
+  );
+  if (toCreate.length === 0) return [];
+
+  const variants = toCreate.map((c) => {
+    const optionValues: Array<{ optionName: string; name: string }> = [
+      { optionName: option1Name, name: c.o1 },
+    ];
+    if (option2Name && c.o2) {
+      optionValues.push({ optionName: option2Name, name: c.o2 });
+    }
+    const v: Record<string, unknown> = { optionValues };
+    if (price) v.price = price;
+    return v;
+  });
+
+  const response = await admin.graphql(CREATE_VARIANTS_BULK, {
+    variables: { productId, variants },
+  });
+
+  const data = (await response.json()) as {
+    data?: {
+      productVariantsBulkCreate?: {
+        userErrors: Array<{ field: string[]; message: string }>;
+      };
+    };
+  };
+
+  return (data.data?.productVariantsBulkCreate?.userErrors ?? []).map(
+    (e) => `[variant create] ${e.message}`
+  );
+}
