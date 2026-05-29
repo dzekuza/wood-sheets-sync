@@ -33,10 +33,11 @@ const VARIANT_FIELDS = new Set([
   "barcode",
 ]);
 
-// image_1 … image_10
-const IMAGE_FIELDS = new Set(
-  Array.from({ length: 10 }, (_, i) => `image_${i + 1}`)
-);
+// "images" (pipe-separated) or image_1 … image_10
+const IMAGE_FIELDS = new Set([
+  "images",
+  ...Array.from({ length: 10 }, (_, i) => `image_${i + 1}`),
+]);
 
 // option1_name, option1_values, option2_name, option2_values
 const OPTION_FIELDS = new Set([
@@ -219,10 +220,16 @@ export async function runSync(
             // "sku" is informational — already used for lookup
           }
         } else if (IMAGE_FIELDS.has(mapping.shopifyField)) {
-          // image_1 … image_10 → slot 0 … 9
-          const slot = parseInt(mapping.shopifyField.replace("image_", ""), 10) - 1;
-          if (rawValue.startsWith("http")) {
-            imageUrls[slot] = rawValue;
+          if (mapping.shopifyField === "images") {
+            // Pipe-separated list: "url1|url2|url3"
+            rawValue.split("|").forEach((url, i) => {
+              const u = url.trim();
+              if (u.startsWith("http") && i < 10) imageUrls[i] = u;
+            });
+          } else {
+            // image_1 … image_10 → slot 0 … 9
+            const slot = parseInt(mapping.shopifyField.replace("image_", ""), 10) - 1;
+            if (rawValue.startsWith("http")) imageUrls[slot] = rawValue;
           }
         } else if (OPTION_FIELDS.has(mapping.shopifyField)) {
           switch (mapping.shopifyField) {

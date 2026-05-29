@@ -22,7 +22,8 @@ export const FieldMappingSchema = z.object({
     "compare_at_price",
     "sku",
     "barcode",
-    // Images (up to 10)
+    // Images — single pipe-separated column or up to 10 individual columns
+    "images",
     "image_1",
     "image_2",
     "image_3",
@@ -92,7 +93,8 @@ export const SHOPIFY_FIELDS = [
   { value: "compare_at_price", label: "Compare At Price" },
   { value: "sku",              label: "SKU" },
   { value: "barcode",          label: "Barcode" },
-  // ── Images (attach up to 10 images by URL) ──────────────────────────────────
+  // ── Images ──────────────────────────────────────────────────────────────────
+  { value: "images",           label: "Images (pipe-separated URLs)" },
   { value: "image_1",          label: "Image 1 (URL)" },
   { value: "image_2",          label: "Image 2 (URL)" },
   { value: "image_3",          label: "Image 3 (URL)" },
