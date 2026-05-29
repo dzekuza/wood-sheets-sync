@@ -51,6 +51,34 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function recordProductResult(
+  logId: string,
+  shop: string,
+  productId: string,
+  productTitle: string,
+  handle: string,
+  status: "updated" | "skipped" | "error",
+  syncedFields: string[],
+  errorMessage?: string,
+) {
+  try {
+    await prisma.syncProductResult.create({
+      data: {
+        syncLogId: logId,
+        shop,
+        productId,
+        productTitle,
+        handle,
+        status,
+        syncedFields: syncedFields.length > 0 ? JSON.stringify(syncedFields) : null,
+        errorMessage: errorMessage ?? null,
+      },
+    });
+  } catch {
+    // non-fatal — don't interrupt the sync
+  }
+}
+
 export async function runSync(
   shop: string,
   triggeredBy: "manual" | "scheduled",
@@ -144,6 +172,9 @@ export async function runSync(
         continue;
       }
 
+      // Fields written this row (for diff display)
+      const syncedFields: string[] = [];
+
       // Build update payload from field mappings
       const productPayload: Partial<{
         title: string;
@@ -176,6 +207,8 @@ export async function runSync(
         if (colIndex === undefined) continue;
 
         const rawValue = (row[colIndex] ?? "").toString().trim();
+
+        if (rawValue) syncedFields.push(mapping.shopifyField);
 
         if (PRODUCT_FIELDS.has(mapping.shopifyField)) {
           switch (mapping.shopifyField) {
@@ -287,6 +320,7 @@ export async function runSync(
         if ("errors" in result) {
           errorMessages.push(...result.errors.map((e) => `[create ${identifier}] ${e}`));
           errorCount++;
+          await recordProductResult(logId, shop, "", title, "", "error", [], result.errors.join("; "));
         } else {
           // Attach images and options to the newly-created product
           const newProductId = result.productId;
@@ -322,6 +356,7 @@ export async function runSync(
             if (optErrors.length > 0) errorMessages.push(...optErrors);
           }
 
+          await recordProductResult(logId, shop, newProductId, title, "", "updated", syncedFields);
           updatedCount++;
         }
 
@@ -387,11 +422,11 @@ export async function runSync(
 
       if (rowErrors.length > 0) {
         errorCount++;
-        errorMessages.push(
-          `${identifier}: ${rowErrors.join("; ")}`
-        );
+        errorMessages.push(`${identifier}: ${rowErrors.join("; ")}`);
+        await recordProductResult(logId, shop, variant.productId, productPayload.title ?? identifier, "", "error", syncedFields, rowErrors.join("; "));
       } else {
         updatedCount++;
+        await recordProductResult(logId, shop, variant.productId, productPayload.title ?? identifier, "", "updated", syncedFields);
       }
 
       // Rate-limit: 100ms pause between rows

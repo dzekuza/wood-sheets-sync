@@ -23,6 +23,8 @@ import { listProducts } from "../lib/shopify-graphql.server";
 import { fetchSheetRows } from "../lib/google-sheets.server";
 import type { SyncLog } from "../lib/sync-logger.server";
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 type ProductRow = {
   id: string;
   title: string;
@@ -35,6 +37,14 @@ type ProductRow = {
   identifier: string;
 };
 
+type SyncResultRow = {
+  productId: string;
+  productTitle: string;
+  status: string;
+  syncedFields: string[];
+  errorMessage: string | null;
+};
+
 type LoaderData = {
   shop: string;
   config: {
@@ -44,11 +54,15 @@ type LoaderData = {
     skuColumn: string | null;
     matchField: string;
     mappingsCount: number;
+    mappedFields: string[];
   } | null;
   lastLog: SyncLog | null;
   products: ProductRow[];
+  lastSyncResults: SyncResultRow[];
   sheetError: string | null;
 };
+
+// ── Loader ────────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -59,25 +73,34 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     prisma.syncLog.findFirst({ where: { shop }, orderBy: { startedAt: "desc" } }),
   ]);
 
-  // Fetch Shopify products
+  // Fetch per-product results from last sync
+  let lastSyncResults: SyncResultRow[] = [];
+  if (lastLog) {
+    const raw = await prisma.syncProductResult.findMany({
+      where: { syncLogId: lastLog.id },
+    });
+    lastSyncResults = raw.map((r) => ({
+      productId: r.productId,
+      productTitle: r.productTitle,
+      status: r.status,
+      syncedFields: r.syncedFields ? (JSON.parse(r.syncedFields) as string[]) : [],
+      errorMessage: r.errorMessage,
+    }));
+  }
+
   const shopifyProducts = await listProducts(admin, 100);
 
-  // If no config, all products are "shopify only"
   if (!config) {
     return json<LoaderData>({
       shop,
       config: null,
       lastLog,
+      lastSyncResults,
       sheetError: null,
-      products: shopifyProducts.map((p) => ({
-        ...p,
-        synced: false,
-        identifier: "",
-      })),
+      products: shopifyProducts.map((p) => ({ ...p, synced: false, identifier: "" })),
     });
   }
 
-  // Fetch sheet rows and build identifier set
   let sheetIdentifiers = new Set<string>();
   let sheetError: string | null = null;
   const matchField = config.matchField ?? "sku";
@@ -101,7 +124,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const products: ProductRow[] = shopifyProducts.map((p) => {
     let identifier = "";
     let synced = false;
-
     if (matchField === "title") {
       identifier = p.title;
       synced = sheetIdentifiers.has(p.title.toLowerCase());
@@ -112,9 +134,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       identifier = p.sku;
       synced = Boolean(p.sku) && sheetIdentifiers.has(p.sku.toLowerCase());
     }
-
     return { ...p, identifier, synced };
   });
+
+  // Deduplicate mapped fields, exclude identifier fields from column list
+  const skipInTable = new Set(["title", "body_html", "sku", "barcode", "status"]);
+  const mappedFields = config.mappings
+    .map((m) => m.shopifyField)
+    .filter((f) => !skipInTable.has(f));
 
   return json<LoaderData>({
     shop,
@@ -125,12 +152,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       skuColumn: config.skuColumn,
       matchField,
       mappingsCount: config.mappings.length,
+      mappedFields,
     },
     lastLog,
+    lastSyncResults,
     products,
     sheetError,
   });
 };
+
+// ── Action ────────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -138,14 +169,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return json(result);
 };
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 const MATCH_FIELD_LABEL: Record<string, string> = {
   sku: "SKU",
   title: "Title",
   handle: "Handle",
 };
 
+const FIELD_LABEL: Record<string, string> = {
+  price: "Price",
+  compare_at_price: "Compare price",
+  vendor: "Vendor",
+  product_type: "Type",
+  tags: "Tags",
+  images: "Images",
+  image_1: "Image 1",
+  option1_name: "Option 1",
+  option1_values: "Option 1 values",
+  option2_name: "Option 2",
+  option2_values: "Option 2 values",
+};
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function Index() {
-  const { config, lastLog, products, sheetError } =
+  const { config, lastLog, products, lastSyncResults, sheetError } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const navigate = useNavigate();
@@ -155,6 +204,15 @@ export default function Index() {
 
   const syncedCount = products.filter((p) => p.synced).length;
   const matchLabel = config ? (MATCH_FIELD_LABEL[config.matchField] ?? "SKU") : "SKU";
+
+  // Build a quick-lookup: productId → syncResult
+  const resultsByProductId = new Map(lastSyncResults.map((r) => [r.productId, r]));
+
+  // Mapped field columns to show in the table
+  const fieldCols = config?.mappedFields ?? [];
+
+  // After a sync action, use those results; otherwise use DB results
+  const showSyncBanner = syncResult || lastLog;
 
   return (
     <Page>
@@ -171,8 +229,7 @@ export default function Index() {
                 >
                   <Text as="p" variant="bodyMd">
                     Connect a Google Sheet to start syncing product data into
-                    Shopify. Head to Settings to enter your sheet URL and map
-                    columns.
+                    Shopify. Head to Settings to enter your sheet URL and map columns.
                   </Text>
                 </Banner>
               )}
@@ -230,14 +287,15 @@ export default function Index() {
                 </Card>
               )}
 
+              {/* Sync result banner */}
               {syncResult && (
                 <Banner
                   title={syncResult.errorCount === 0 ? "Sync completed" : "Sync completed with errors"}
                   tone={syncResult.errorCount === 0 ? "success" : "critical"}
                 >
                   <Text as="p" variant="bodyMd">
-                    {syncResult.updatedCount} updated, {syncResult.skippedCount} skipped,{" "}
-                    {syncResult.errorCount} errors.
+                    {syncResult.updatedCount} updated · {syncResult.skippedCount} skipped ·{" "}
+                    {syncResult.errorCount} errors
                   </Text>
                 </Banner>
               )}
@@ -245,25 +303,21 @@ export default function Index() {
               {lastLog && !syncResult && (
                 <Banner
                   title={
-                    lastLog.status === "success"
-                      ? "Last sync succeeded"
-                      : lastLog.status === "running"
-                      ? "Sync in progress"
-                      : "Last sync had errors"
+                    lastLog.status === "success" ? "Last sync succeeded"
+                    : lastLog.status === "running" ? "Sync in progress"
+                    : "Last sync had errors"
                   }
                   tone={
-                    lastLog.status === "success"
-                      ? "success"
-                      : lastLog.status === "running"
-                      ? "info"
-                      : "critical"
+                    lastLog.status === "success" ? "success"
+                    : lastLog.status === "running" ? "info"
+                    : "critical"
                   }
                 >
                   <BlockStack gap="100">
                     {lastLog.status !== "running" && (
                       <Text as="p" variant="bodyMd">
-                        {lastLog.updatedCount} updated, {lastLog.skippedCount} skipped,{" "}
-                        {lastLog.errorCount} errors.
+                        {lastLog.updatedCount} updated · {lastLog.skippedCount} skipped ·{" "}
+                        {lastLog.errorCount} errors
                       </Text>
                     )}
                     {lastLog.completedAt && (
@@ -275,6 +329,7 @@ export default function Index() {
                 </Banner>
               )}
 
+              {/* Products table with per-field sync highlights */}
               <Card padding="0">
                 <IndexTable
                   resourceName={{ singular: "product", plural: "products" }}
@@ -285,82 +340,161 @@ export default function Index() {
                     { title: "Status" },
                     { title: matchLabel },
                     { title: "Price" },
-                    { title: "Sheet sync" },
+                    ...fieldCols
+                      .filter((f) => f !== "price")
+                      .map((f) => ({ title: FIELD_LABEL[f] ?? f })),
+                    { title: "Last sync" },
                   ]}
                   selectable={false}
                 >
-                  {products.map((product, index) => (
-                    <IndexTable.Row
-                      id={product.id}
-                      key={product.id}
-                      position={index}
-                    >
-                      <IndexTable.Cell>
-                        <Thumbnail
-                          source={product.image ?? ""}
-                          alt={product.title}
-                          size="small"
-                        />
-                      </IndexTable.Cell>
+                  {products.map((product, index) => {
+                    const result = resultsByProductId.get(product.id);
+                    const synced = result?.status === "updated";
+                    const hasError = result?.status === "error";
+                    const updatedFields = new Set(result?.syncedFields ?? []);
 
-                      <IndexTable.Cell>
-                        <BlockStack gap="050">
-                          <Text as="span" variant="bodyMd" fontWeight="semibold">
-                            {product.title}
-                          </Text>
-                          <Text as="span" variant="bodySm" tone="subdued">
-                            {product.handle}
-                          </Text>
-                        </BlockStack>
-                      </IndexTable.Cell>
+                    return (
+                      <IndexTable.Row id={product.id} key={product.id} position={index}>
+                        {/* Thumbnail */}
+                        <IndexTable.Cell>
+                          <Thumbnail
+                            source={product.image ?? ""}
+                            alt={product.title}
+                            size="small"
+                          />
+                        </IndexTable.Cell>
 
-                      <IndexTable.Cell>
-                        <Badge
-                          tone={
-                            product.status === "ACTIVE"
-                              ? "success"
-                              : product.status === "DRAFT"
-                              ? "info"
+                        {/* Product title + handle */}
+                        <IndexTable.Cell>
+                          <BlockStack gap="050">
+                            <Text as="span" variant="bodyMd" fontWeight="semibold">
+                              {product.title}
+                            </Text>
+                            <Text as="span" variant="bodySm" tone="subdued">
+                              {product.handle}
+                            </Text>
+                          </BlockStack>
+                        </IndexTable.Cell>
+
+                        {/* Active/Draft/Archived */}
+                        <IndexTable.Cell>
+                          <Badge
+                            tone={
+                              product.status === "ACTIVE" ? "success"
+                              : product.status === "DRAFT" ? "info"
                               : "critical"
-                          }
-                        >
-                          {product.status === "ACTIVE"
-                            ? "Active"
-                            : product.status === "DRAFT"
-                            ? "Draft"
-                            : "Archived"}
-                        </Badge>
-                      </IndexTable.Cell>
+                            }
+                          >
+                            {product.status === "ACTIVE" ? "Active"
+                              : product.status === "DRAFT" ? "Draft"
+                              : "Archived"}
+                          </Badge>
+                        </IndexTable.Cell>
 
-                      <IndexTable.Cell>
-                        <Text as="span" variant="bodyMd" tone="subdued">
-                          {product.identifier || "—"}
-                        </Text>
-                      </IndexTable.Cell>
+                        {/* Identifier (SKU / title / handle) */}
+                        <IndexTable.Cell>
+                          <Text as="span" variant="bodyMd" tone="subdued">
+                            {product.identifier || "—"}
+                          </Text>
+                        </IndexTable.Cell>
 
-                      <IndexTable.Cell>
-                        <Text as="span" variant="bodyMd">
-                          {product.price ? `$${product.price}` : "—"}
-                        </Text>
-                      </IndexTable.Cell>
+                        {/* Price — highlight if synced */}
+                        <IndexTable.Cell>
+                          <SyncedCell
+                            value={product.price ? `£${product.price}` : "—"}
+                            updated={updatedFields.has("price")}
+                          />
+                        </IndexTable.Cell>
 
-                      <IndexTable.Cell>
-                        {product.synced ? (
-                          <Badge tone="success">Synced</Badge>
-                        ) : (
-                          <Tooltip content="This product's identifier was not found in the sheet. It will be updated from Shopify only.">
-                            <Badge tone="attention">Shopify only</Badge>
-                          </Tooltip>
-                        )}
-                      </IndexTable.Cell>
-                    </IndexTable.Row>
-                  ))}
+                        {/* Dynamic field columns */}
+                        {fieldCols
+                          .filter((f) => f !== "price")
+                          .map((field) => (
+                            <IndexTable.Cell key={field}>
+                              <SyncedCell
+                                value={fieldValueLabel(field)}
+                                updated={updatedFields.has(field)}
+                              />
+                            </IndexTable.Cell>
+                          ))}
+
+                        {/* Last sync status */}
+                        <IndexTable.Cell>
+                          {hasError ? (
+                            <Tooltip content={result?.errorMessage ?? "Error during sync"}>
+                              <Badge tone="critical">Error</Badge>
+                            </Tooltip>
+                          ) : synced ? (
+                            <Badge tone="success">Updated</Badge>
+                          ) : product.synced ? (
+                            <Badge tone="attention">In sheet</Badge>
+                          ) : (
+                            <Tooltip content="This product was not found in the sheet.">
+                              <Badge>Shopify only</Badge>
+                            </Tooltip>
+                          )}
+                        </IndexTable.Cell>
+                      </IndexTable.Row>
+                    );
+                  })}
                 </IndexTable>
               </Card>
+
+              {/* Legend */}
+              {showSyncBanner && lastSyncResults.length > 0 && (
+                <InlineStack gap="300" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued">Legend:</Text>
+                  <InlineStack gap="100" blockAlign="center">
+                    <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: "#1a9c3e" }} />
+                    <Text as="span" variant="bodySm" tone="subdued">Updated in last sync</Text>
+                  </InlineStack>
+                  <InlineStack gap="100" blockAlign="center">
+                    <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: "#e0e0e0" }} />
+                    <Text as="span" variant="bodySm" tone="subdued">Not changed</Text>
+                  </InlineStack>
+                </InlineStack>
+              )}
             </BlockStack>
           </Layout.Section>
         </Layout>
       </BlockStack>
     </Page>
   );
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function SyncedCell({ value, updated }: { value: string; updated: boolean }) {
+  if (!updated) {
+    return (
+      <Text as="span" variant="bodyMd" tone="subdued">
+        {value}
+      </Text>
+    );
+  }
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        background: "#d4f7e0",
+        borderRadius: 4,
+        padding: "2px 6px",
+        fontWeight: 600,
+        color: "#0a5c2a",
+        fontSize: 13,
+      }}
+    >
+      ↑ {value}
+    </span>
+  );
+}
+
+function fieldValueLabel(field: string): string {
+  // For non-value fields (options, images), just show a check mark placeholder
+  if (field.startsWith("option") || field === "images" || field.startsWith("image_")) {
+    return "✓";
+  }
+  return "—";
 }

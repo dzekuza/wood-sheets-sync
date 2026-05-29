@@ -51,19 +51,37 @@ model SyncSchedule {
 }
 
 model SyncLog {
-  id            String    @id @default(cuid())
+  id            String               @id @default(cuid())
   shop          String
   triggeredBy   String
   status        String
-  totalRows     Int       @default(0)
-  updatedCount  Int       @default(0)
-  skippedCount  Int       @default(0)
-  errorCount    Int       @default(0)
+  totalRows     Int                  @default(0)
+  updatedCount  Int                  @default(0)
+  skippedCount  Int                  @default(0)
+  errorCount    Int                  @default(0)
   errorMessages String?
-  startedAt     DateTime  @default(now())
+  startedAt     DateTime             @default(now())
   completedAt   DateTime?
+  productResults SyncProductResult[]
 
   @@index([shop, startedAt])
+}
+
+model SyncProductResult {
+  id           String   @id @default(cuid())
+  syncLogId    String
+  shop         String
+  productId    String
+  productTitle String
+  handle       String
+  status       String
+  syncedFields String?
+  errorMessage String?
+  createdAt    DateTime @default(now())
+  syncLog      SyncLog  @relation(fields: [syncLogId], references: [id], onDelete: Cascade)
+
+  @@index([syncLogId])
+  @@index([shop])
 }
 
 model Session {
