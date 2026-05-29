@@ -5,8 +5,10 @@ import {
   findVariantBySku,
   findProductByTitle,
   findProductByHandle,
+  findVariantByOptions,
   updateProductFields,
   updateVariantFields,
+  updateAllVariantsFields,
   createProduct,
   attachProductImages,
   upsertProductOption,
@@ -20,6 +22,7 @@ import {
 // Shopify field names that map to product-level vs variant-level mutations
 const PRODUCT_FIELDS = new Set([
   "title",
+  "handle",
   "body_html",
   "vendor",
   "product_type",
@@ -34,6 +37,13 @@ const VARIANT_FIELDS = new Set([
   "barcode",
 ]);
 
+// Per-variant price fields — same as VARIANT_FIELDS but only update the
+// specific variant matched by SKU, not all variants on the product.
+const VARIANT_SPECIFIC_PRICE_FIELDS = new Set([
+  "variant_price",
+  "variant_compare_at_price",
+]);
+
 // "images" (pipe-separated) or image_1 … image_10
 const IMAGE_FIELDS = new Set([
   "images",
@@ -44,8 +54,10 @@ const IMAGE_FIELDS = new Set([
 const OPTION_FIELDS = new Set([
   "option1_name",
   "option1_values",
+  "option1_value",
   "option2_name",
   "option2_values",
+  "option2_value",
 ]);
 
 function delay(ms: number): Promise<void> {
@@ -164,8 +176,27 @@ export async function runSync(
       return { logId, updatedCount: 0, skippedCount: 0, errorCount: 1 };
     }
 
+    // Clear any stale cancel flag before starting
+    await prisma.syncCancel.deleteMany({ where: { shop } });
+
     // 6. Process each data row
     for (const row of dataRows) {
+      // Check for cancellation request
+      const cancelRequest = await prisma.syncCancel.findUnique({ where: { shop } });
+      if (cancelRequest) {
+        await prisma.syncCancel.delete({ where: { shop } });
+        await updateSyncLog(logId, {
+          status: "partial",
+          totalRows,
+          updatedCount,
+          skippedCount,
+          errorCount,
+          errorMessages: [...errorMessages, "Sync stopped by user."],
+          completedAt: new Date(),
+        });
+        return { logId, updatedCount, skippedCount, errorCount };
+      }
+
       const identifier = row[identifierColumnIndex]?.trim() ?? "";
 
       if (!identifier) {
@@ -179,6 +210,7 @@ export async function runSync(
       // Build update payload from field mappings
       const productPayload: Partial<{
         title: string;
+        handle: string;
         bodyHtml: string;
         vendor: string;
         productType: string;
@@ -190,6 +222,14 @@ export async function runSync(
         price: string;
         compareAtPrice: string | null;
         barcode: string;
+      }> = {};
+      let variantSku = matchField === "sku" ? identifier : undefined;
+      let hasMappedVariantSku = false;
+
+      // Per-variant price — updates only the specific variant matched by SKU
+      const variantSpecificPrice: Partial<{
+        price: string;
+        compareAtPrice: string | null;
       }> = {};
 
       // Ordered image URLs (image_1 first, then image_2, …)
@@ -215,6 +255,9 @@ export async function runSync(
           switch (mapping.shopifyField) {
             case "title":
               productPayload.title = rawValue;
+              break;
+            case "handle":
+              productPayload.handle = rawValue;
               break;
             case "body_html":
               productPayload.bodyHtml = rawValue;
@@ -251,7 +294,10 @@ export async function runSync(
             case "barcode":
               variantPayload.barcode = rawValue;
               break;
-            // "sku" is informational — already used for lookup
+            case "sku":
+              variantSku = rawValue || variantSku;
+              hasMappedVariantSku = Boolean(rawValue);
+              break;
           }
         } else if (IMAGE_FIELDS.has(mapping.shopifyField)) {
           if (mapping.shopifyField === "images") {
@@ -265,6 +311,16 @@ export async function runSync(
             const slot = parseInt(mapping.shopifyField.replace("image_", ""), 10) - 1;
             if (rawValue.startsWith("http")) imageUrls[slot] = rawValue;
           }
+        } else if (VARIANT_SPECIFIC_PRICE_FIELDS.has(mapping.shopifyField)) {
+          switch (mapping.shopifyField) {
+            case "variant_price":
+              variantSpecificPrice.price = rawValue;
+              break;
+            case "variant_compare_at_price":
+              variantSpecificPrice.compareAtPrice =
+                rawValue === "" || rawValue === "0" ? null : rawValue;
+              break;
+          }
         } else if (OPTION_FIELDS.has(mapping.shopifyField)) {
           switch (mapping.shopifyField) {
             case "option1_name":
@@ -276,6 +332,9 @@ export async function runSync(
                 .map((v) => v.trim())
                 .filter(Boolean);
               break;
+            case "option1_value":
+              if (rawValue) optionData.option1Values = [rawValue];
+              break;
             case "option2_name":
               optionData.option2Name = rawValue;
               break;
@@ -284,6 +343,9 @@ export async function runSync(
                 .split(",")
                 .map((v) => v.trim())
                 .filter(Boolean);
+              break;
+            case "option2_value":
+              if (rawValue) optionData.option2Values = [rawValue];
               break;
           }
         }
@@ -312,11 +374,15 @@ export async function runSync(
         const sku = matchField === "sku" ? identifier : undefined;
         const result = await createProduct(admin, {
           title,
+          handle:
+            productPayload.handle ??
+            (matchField === "handle" ? identifier : undefined),
           bodyHtml: productPayload.bodyHtml,
           vendor: productPayload.vendor,
           productType: productPayload.productType,
           tags: productPayload.tags,
-          sku,
+          status: productPayload.status?.toUpperCase(),
+          sku: variantSku ?? sku,
           price: variantPayload.price,
           compareAtPrice: variantPayload.compareAtPrice,
           barcode: variantPayload.barcode,
@@ -368,7 +434,19 @@ export async function runSync(
               optionData.option1Values,
               optionData.option2Name,
               optionData.option2Values,
-              variantPayload.price
+              variantPayload.price,
+              optionData.option1Values.length === 1
+                ? [{
+                    option1Value: optionData.option1Values[0],
+                    option2Value: optionData.option2Values?.[0],
+                    sku: variantSku,
+                    price: variantPayload.price ?? variantSpecificPrice.price,
+                    compareAtPrice:
+                      variantPayload.compareAtPrice ??
+                      variantSpecificPrice.compareAtPrice,
+                    barcode: variantPayload.barcode,
+                  }]
+                : []
             );
             if (varErrors.length > 0) errorMessages.push(...varErrors);
           }
@@ -394,16 +472,61 @@ export async function runSync(
         rowErrors.push(...productErrors);
       }
 
-      // Apply variant-level updates
+      // Apply variant-level updates across ALL variants (not just the default one)
       const hasVariantFields = Object.keys(variantPayload).length > 0;
       if (hasVariantFields) {
-        const variantErrors = await updateVariantFields(
+        const variantErrors = await updateAllVariantsFields(
           admin,
-          variant.variantId,
           variant.productId,
           variantPayload
         );
         rowErrors.push(...variantErrors);
+      }
+
+      // Apply per-variant price — updates ONLY the specific variant matched by SKU
+      const hasVariantSpecificPrice = Object.keys(variantSpecificPrice).length > 0;
+      const hasRowVariantFields = hasVariantSpecificPrice || hasMappedVariantSku;
+      if (hasRowVariantFields) {
+        if (matchField !== "sku") {
+          const option1Value = optionData.option1Values?.[0];
+          const option2Value = optionData.option2Values?.[0];
+          if (!optionData.option1Name || !option1Value) {
+            rowErrors.push(
+              "[variant row] Updating a specific variant without SKU matching requires option name/value columns."
+            );
+          } else {
+            const optionVariantId = await findVariantByOptions(
+              admin,
+              variant.productId,
+              optionData.option1Name,
+              option1Value,
+              optionData.option2Name,
+              option2Value
+            );
+
+            if (optionVariantId) {
+              const specificErrors = await updateVariantFields(
+                admin,
+                optionVariantId,
+                variant.productId,
+                {
+                  sku: variantSku,
+                  price: variantSpecificPrice.price,
+                  compareAtPrice: variantSpecificPrice.compareAtPrice,
+                }
+              );
+              rowErrors.push(...specificErrors);
+            }
+          }
+        } else {
+          const specificErrors = await updateVariantFields(
+            admin,
+            variant.variantId,
+            variant.productId,
+            variantSpecificPrice
+          );
+          rowErrors.push(...specificErrors);
+        }
       }
 
       // Attach images (skips URLs already on the product)
@@ -444,7 +567,19 @@ export async function runSync(
           optionData.option1Values,
           optionData.option2Name,
           optionData.option2Values,
-          variantPayload.price
+          variantPayload.price,
+          optionData.option1Values.length === 1
+            ? [{
+                option1Value: optionData.option1Values[0],
+                option2Value: optionData.option2Values?.[0],
+                sku: variantSku,
+                price: variantPayload.price ?? variantSpecificPrice.price,
+                compareAtPrice:
+                  variantPayload.compareAtPrice ??
+                  variantSpecificPrice.compareAtPrice,
+                barcode: variantPayload.barcode,
+              }]
+            : []
         );
         rowErrors.push(...varErrors);
       }

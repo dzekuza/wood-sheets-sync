@@ -240,8 +240,8 @@ export async function findProductByHandle(
 // ── Mutation: update product-level fields ─────────────────────────────────────
 
 const UPDATE_PRODUCT = `#graphql
-  mutation UpdateProduct($product: ProductUpdateInput!, $identifier: ProductUpdateIdentifiers!) {
-    productUpdate(product: $product, identifier: $identifier) {
+  mutation UpdateProduct($input: ProductInput!) {
+    productUpdate(input: $input) {
       product {
         id
       }
@@ -253,35 +253,29 @@ const UPDATE_PRODUCT = `#graphql
   }
 `;
 
-/**
- * Update product-level fields (title, bodyHtml, vendor, productType, tags).
- * Only call this when at least one of these fields is present in `fields`.
- * Returns an array of user-error strings (empty array = success).
- */
 export async function updateProductFields(
   admin: AdminApiContext,
   productId: string,
   fields: Partial<{
     title: string;
+    handle: string;
     bodyHtml: string;
     vendor: string;
     productType: string;
     tags: string[];
   }>
 ): Promise<string[]> {
-  const product: Record<string, unknown> = {};
+  const input: Record<string, unknown> = { id: productId };
 
-  if (fields.title !== undefined) product.title = fields.title;
-  if (fields.bodyHtml !== undefined) product.bodyHtml = fields.bodyHtml;
-  if (fields.vendor !== undefined) product.vendor = fields.vendor;
-  if (fields.productType !== undefined) product.productType = fields.productType;
-  if (fields.tags !== undefined) product.tags = fields.tags;
+  if (fields.title !== undefined) input.title = fields.title;
+  if (fields.handle !== undefined) input.handle = fields.handle;
+  if (fields.bodyHtml !== undefined) input.bodyHtml = fields.bodyHtml;
+  if (fields.vendor !== undefined) input.vendor = fields.vendor;
+  if (fields.productType !== undefined) input.productType = fields.productType;
+  if (fields.tags !== undefined) input.tags = fields.tags;
 
   const response = await admin.graphql(UPDATE_PRODUCT, {
-    variables: {
-      product,
-      identifier: { id: productId },
-    },
+    variables: { input },
   });
 
   const data = (await response.json()) as {
@@ -323,6 +317,7 @@ export async function updateVariantFields(
   variantId: string,
   productId: string,
   fields: Partial<{
+    sku: string;
     price: string;
     compareAtPrice: string | null;
     barcode: string;
@@ -330,6 +325,7 @@ export async function updateVariantFields(
 ): Promise<string[]> {
   const variantInput: Record<string, unknown> = { id: variantId };
 
+  if (fields.sku !== undefined) variantInput.sku = fields.sku;
   if (fields.price !== undefined) variantInput.price = fields.price;
   if (fields.compareAtPrice !== undefined)
     variantInput.compareAtPrice =
@@ -628,10 +624,12 @@ export async function createProduct(
   admin: AdminApiContext,
   fields: {
     title: string;
+    handle?: string;
     bodyHtml?: string;
     vendor?: string;
     productType?: string;
     tags?: string[];
+    status?: string;
     sku?: string;
     price?: string;
     compareAtPrice?: string | null;
@@ -641,8 +639,9 @@ export async function createProduct(
   // Step 1: create the product (product-level fields only)
   const productInput: Record<string, unknown> = {
     title: fields.title,
-    status: "ACTIVE",
+    status: fields.status ?? "ACTIVE",
   };
+  if (fields.handle) productInput.handle = fields.handle;
   if (fields.bodyHtml) productInput.descriptionHtml = fields.bodyHtml;
   if (fields.vendor) productInput.vendor = fields.vendor;
   if (fields.productType) productInput.productType = fields.productType;
@@ -750,7 +749,15 @@ export async function syncVariantCombinations(
   option1Values: string[],
   option2Name: string | undefined,
   option2Values: string[] | undefined,
-  price: string | undefined
+  price: string | undefined,
+  variantDetails: Array<{
+    option1Value: string;
+    option2Value?: string;
+    sku?: string;
+    price?: string;
+    compareAtPrice?: string | null;
+    barcode?: string;
+  }> = []
 ): Promise<string[]> {
   type Combo = { o1: string; o2?: string };
   const desired: Combo[] = [];
@@ -807,6 +814,13 @@ export async function syncVariantCombinations(
   );
   if (toCreate.length === 0) return [];
 
+  const detailByCombo = new Map(
+    variantDetails.map((detail) => [
+      `${detail.option1Value}|||${detail.option2Value ?? ""}`,
+      detail,
+    ])
+  );
+
   const variants = toCreate.map((c) => {
     const optionValues: Array<{ optionName: string; name: string }> = [
       { optionName: option1Name, name: c.o1 },
@@ -815,7 +829,16 @@ export async function syncVariantCombinations(
       optionValues.push({ optionName: option2Name, name: c.o2 });
     }
     const v: Record<string, unknown> = { optionValues };
-    if (price) v.price = price;
+    const detail = detailByCombo.get(`${c.o1}|||${c.o2 ?? ""}`);
+    if (detail?.sku) v.sku = detail.sku;
+    if (detail?.price ?? price) v.price = detail?.price ?? price;
+    if (detail?.compareAtPrice !== undefined) {
+      v.compareAtPrice =
+        detail.compareAtPrice === "" || detail.compareAtPrice === "0"
+          ? null
+          : detail.compareAtPrice;
+    }
+    if (detail?.barcode) v.barcode = detail.barcode;
     return v;
   });
 
@@ -834,4 +857,136 @@ export async function syncVariantCombinations(
   return (data.data?.productVariantsBulkCreate?.userErrors ?? []).map(
     (e) => `[variant create] ${e.message}`
   );
+}
+
+export async function findVariantByOptions(
+  admin: AdminApiContext,
+  productId: string,
+  option1Name: string,
+  option1Value: string,
+  option2Name?: string,
+  option2Value?: string
+): Promise<string | null> {
+  const response = await admin.graphql(GET_PRODUCT_VARIANTS, {
+    variables: { id: productId },
+  });
+  const data = (await response.json()) as {
+    data?: {
+      product?: {
+        variants: {
+          edges: Array<{
+            node: {
+              id: string;
+              selectedOptions: Array<{ name: string; value: string }>;
+            };
+          }>;
+        };
+      };
+    };
+  };
+
+  const normalize = (value: string) => value.trim().toLowerCase();
+  const match = (data.data?.product?.variants.edges ?? []).find(({ node }) => {
+    const selectedOption1 = node.selectedOptions.find(
+      (option) => normalize(option.name) === normalize(option1Name)
+    );
+    if (normalize(selectedOption1?.value ?? "") !== normalize(option1Value)) {
+      return false;
+    }
+
+    if (!option2Name) return true;
+    const selectedOption2 = node.selectedOptions.find(
+      (option) => normalize(option.name) === normalize(option2Name)
+    );
+    return normalize(selectedOption2?.value ?? "") === normalize(option2Value ?? "");
+  });
+
+  return match?.node.id ?? null;
+}
+
+// ── Mutation: update price/compareAtPrice/barcode on ALL variants ─────────────
+
+const GET_ALL_VARIANT_IDS = `#graphql
+  query GetAllVariantIds($id: ID!, $cursor: String) {
+    product(id: $id) {
+      variants(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { id } }
+      }
+    }
+  }
+`;
+
+/**
+ * Updates price, compareAtPrice, and/or barcode on every variant of a product.
+ * Uses paginated fetching so it works even with 100-variant products.
+ */
+export async function updateAllVariantsFields(
+  admin: AdminApiContext,
+  productId: string,
+  fields: Partial<{
+    price: string;
+    compareAtPrice: string | null;
+    barcode: string;
+  }>
+): Promise<string[]> {
+  // Collect all variant IDs
+  const variantIds: string[] = [];
+  let cursor: string | null = null;
+
+  do {
+    const response = await admin.graphql(GET_ALL_VARIANT_IDS, {
+      variables: { id: productId, cursor },
+    });
+    const data = (await response.json()) as {
+      data?: {
+        product?: {
+          variants: {
+            pageInfo: { hasNextPage: boolean; endCursor: string };
+            edges: Array<{ node: { id: string } }>;
+          };
+        };
+      };
+    };
+    const variants = data.data?.product?.variants;
+    if (!variants) break;
+    for (const e of variants.edges) variantIds.push(e.node.id);
+    cursor = variants.pageInfo.hasNextPage ? variants.pageInfo.endCursor : null;
+  } while (cursor);
+
+  if (variantIds.length === 0) return [];
+
+  // Build per-variant input
+  const variantInput = variantIds.map((id) => {
+    const v: Record<string, unknown> = { id };
+    if (fields.price !== undefined) v.price = fields.price;
+    if (fields.compareAtPrice !== undefined)
+      v.compareAtPrice =
+        fields.compareAtPrice === "" || fields.compareAtPrice === "0"
+          ? null
+          : fields.compareAtPrice;
+    if (fields.barcode !== undefined) v.barcode = fields.barcode;
+    return v;
+  });
+
+  // Shopify allows up to 100 variants per bulk update call — process in chunks
+  const errors: string[] = [];
+  for (let i = 0; i < variantInput.length; i += 100) {
+    const chunk = variantInput.slice(i, i + 100);
+    const response = await admin.graphql(UPDATE_VARIANT, {
+      variables: { productId, variants: chunk },
+    });
+    const data = (await response.json()) as {
+      data?: {
+        productVariantsBulkUpdate?: {
+          userErrors: Array<{ field: string[]; message: string }>;
+        };
+      };
+    };
+    const userErrors =
+      data.data?.productVariantsBulkUpdate?.userErrors ?? [];
+    errors.push(...userErrors.map((e) => `[bulk variant update] ${e.message}`));
+  }
+
+  return errors;
 }

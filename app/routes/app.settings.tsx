@@ -40,8 +40,10 @@ type LoaderData = {
 // ── Auto-detect Shopify field from column name ────────────────────────────────
 
 const COLUMN_ALIASES: Record<string, string> = {
+  handle: "handle",
   description: "body_html",
   "body html": "body_html",
+  "body (html)": "body_html",
   "product description": "body_html",
   "compare at price": "compare_at_price",
   "compare_at_price": "compare_at_price",
@@ -51,6 +53,21 @@ const COLUMN_ALIASES: Record<string, string> = {
   "image urls": "images",
   "image src": "images",
   "image srcs": "images",
+  "option1 name": "option1_name",
+  "option 1 name": "option1_name",
+  "option1 value": "option1_value",
+  "option 1 value": "option1_value",
+  "option1 values": "option1_values",
+  "option 1 values": "option1_values",
+  "option2 name": "option2_name",
+  "option 2 name": "option2_name",
+  "option2 value": "option2_value",
+  "option 2 value": "option2_value",
+  "option2 values": "option2_values",
+  "option 2 values": "option2_values",
+  "variant sku": "sku",
+  "variant price": "variant_price",
+  "variant compare at price": "variant_compare_at_price",
 };
 
 function autoDetectMapping(col: string): string {

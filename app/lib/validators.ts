@@ -12,6 +12,7 @@ export const FieldMappingSchema = z.object({
   shopifyField: z.enum([
     // Product-level
     "title",
+    "handle",
     "body_html",
     "vendor",
     "product_type",
@@ -37,8 +38,13 @@ export const FieldMappingSchema = z.object({
     // Variant options
     "option1_name",
     "option1_values",
+    "option1_value",
     "option2_name",
     "option2_values",
+    "option2_value",
+    // Per-variant price (targets the specific variant matched by SKU, not all variants)
+    "variant_price",
+    "variant_compare_at_price",
   ]),
 });
 
@@ -83,6 +89,7 @@ export function extractSpreadsheetId(url: string): string {
 export const SHOPIFY_FIELDS = [
   // ── Product fields ──────────────────────────────────────────────────────────
   { value: "title",            label: "Title" },
+  { value: "handle",           label: "Handle" },
   { value: "body_html",        label: "Description" },
   { value: "vendor",           label: "Vendor" },
   { value: "product_type",     label: "Product Type" },
@@ -108,6 +115,11 @@ export const SHOPIFY_FIELDS = [
   // ── Variant options ─────────────────────────────────────────────────────────
   { value: "option1_name",     label: "Option 1 Name (e.g. Size)" },
   { value: "option1_values",   label: "Option 1 Values (comma-separated)" },
+  { value: "option1_value",    label: "Option 1 Value (this row)" },
   { value: "option2_name",     label: "Option 2 Name (e.g. Colour)" },
   { value: "option2_values",   label: "Option 2 Values (comma-separated)" },
+  { value: "option2_value",    label: "Option 2 Value (this row)" },
+  // ── Per-variant price (row must be matched by SKU) ───────────────────────────
+  { value: "variant_price",             label: "Variant Price (this SKU only)" },
+  { value: "variant_compare_at_price",  label: "Variant Compare At Price (this SKU only)" },
 ] as const;

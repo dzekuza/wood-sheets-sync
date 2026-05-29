@@ -7,9 +7,22 @@ import fs from 'node:fs'
 const env = { ...process.env }
 
 // place Sqlite3 database on volume
-const source = path.resolve('/dev.sqlite')
-const target = '/data/' + path.basename(source)
-if (!fs.existsSync(source) && fs.existsSync('/data')) fs.symlinkSync(target, source)
+// Prisma resolves "file:dev.sqlite" relative to /app/prisma/, so the symlink must live there
+const source = '/app/prisma/dev.sqlite'
+const target = '/data/dev.sqlite'
+if (fs.existsSync('/data')) {
+  const sourceExists = fs.existsSync(source)
+  const isSymlink = sourceExists && fs.lstatSync(source).isSymbolicLink()
+  if (!isSymlink) {
+    // If source is a regular file (baked into image) and volume has no DB yet,
+    // seed the volume with it so existing data isn't lost on first fix.
+    if (sourceExists && !fs.existsSync(target)) {
+      fs.copyFileSync(source, target)
+    }
+    if (sourceExists) fs.unlinkSync(source)
+    fs.symlinkSync(target, source)
+  }
+}
 const newDb = !fs.existsSync(target)
 if (newDb && process.env.BUCKET_NAME) {
   await exec(`npx litestream restore -config litestream.yml -if-replica-exists ${target}`)

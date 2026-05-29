@@ -165,7 +165,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
-  const result = await runSync(session.shop, "manual", admin);
+  const shop = session.shop;
+
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  if (intent === "cancel") {
+    await prisma.syncCancel.upsert({
+      where: { shop },
+      create: { shop },
+      update: { createdAt: new Date() },
+    });
+    return json({ cancelled: true });
+  }
+
+  const result = await runSync(shop, "manual", admin);
   return json(result);
 };
 
@@ -205,8 +219,12 @@ export default function Index() {
   const fetcher = useFetcher<typeof action>();
   const navigate = useNavigate();
 
+  const cancelFetcher = useFetcher<{ cancelled?: boolean }>();
   const isSyncing = fetcher.state !== "idle" && fetcher.formMethod === "POST";
+  const isCancelling = cancelFetcher.state !== "idle";
   const syncResult = fetcher.data;
+  const cancelResult = cancelFetcher.data;
+  const isRunning = lastLog?.status === "running" || isSyncing;
 
   const syncedCount = products.filter((p) => p.synced).length;
   const matchLabel = config ? (MATCH_FIELD_LABEL[config.matchField] ?? "SKU") : "SKU";
@@ -252,11 +270,25 @@ export default function Index() {
                     <InlineStack align="space-between" blockAlign="center">
                       <Text as="h2" variant="headingMd">Connected Sheet</Text>
                       <InlineStack gap="300">
-                        <fetcher.Form method="post">
-                          <Button variant="primary" submit loading={isSyncing}>
-                            Sync Now
-                          </Button>
-                        </fetcher.Form>
+                        {isRunning ? (
+                          <cancelFetcher.Form method="post" action="/api/sync-cancel">
+                            <input type="hidden" name="intent" value="cancel" />
+                            <Button
+                              variant="primary"
+                              tone="critical"
+                              submit
+                              loading={isCancelling}
+                            >
+                              Stop Sync
+                            </Button>
+                          </cancelFetcher.Form>
+                        ) : (
+                          <fetcher.Form method="post">
+                            <Button variant="primary" submit loading={isSyncing}>
+                              Sync Now
+                            </Button>
+                          </fetcher.Form>
+                        )}
                         <Button variant="plain" onClick={() => navigate("/app/settings")}>
                           Edit settings
                         </Button>
@@ -294,7 +326,7 @@ export default function Index() {
               )}
 
               {/* Sync result banner */}
-              {syncResult && (
+              {syncResult && "updatedCount" in syncResult && (
                 <Banner
                   title={syncResult.errorCount === 0 ? "Sync completed" : "Sync completed with errors"}
                   tone={syncResult.errorCount === 0 ? "success" : "critical"}
@@ -305,12 +337,17 @@ export default function Index() {
                   </Text>
                 </Banner>
               )}
+              {cancelResult && "cancelled" in cancelResult && (
+                <Banner title="Sync stopped" tone="warning">
+                  <Text as="p" variant="bodyMd">Sync was stopped by user.</Text>
+                </Banner>
+              )}
 
               {lastLog && !syncResult && (
                 <Banner
                   title={
                     lastLog.status === "success" ? "Last sync succeeded"
-                    : lastLog.status === "running" ? "Sync in progress"
+                    : lastLog.status === "running" ? "Sync in progress — click Stop Sync to cancel"
                     : "Last sync had errors"
                   }
                   tone={

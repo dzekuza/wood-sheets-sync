@@ -85,6 +85,12 @@ model SyncProductResult {
   @@index([shop])
 }
 
+model SyncCancel {
+  id        String   @id @default(cuid())
+  shop      String   @unique
+  createdAt DateTime @default(now())
+}
+
 model Session {
   id                  String    @id
   shop                String
