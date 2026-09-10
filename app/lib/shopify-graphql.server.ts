@@ -505,8 +505,8 @@ const CREATE_PRODUCT_OPTIONS = `#graphql
 `;
 
 const UPDATE_PRODUCT_OPTION = `#graphql
-  mutation productOptionUpdate($productId: ID!, $option: OptionUpdateInput!, $variantStrategy: ProductOptionUpdateVariantStrategy) {
-    productOptionUpdate(productId: $productId, option: $option, variantStrategy: $variantStrategy) {
+  mutation productOptionUpdate($productId: ID!, $option: OptionUpdateInput!, $optionValuesToAdd: [OptionValueCreateInput!], $variantStrategy: ProductOptionUpdateVariantStrategy) {
+    productOptionUpdate(productId: $productId, option: $option, optionValuesToAdd: $optionValuesToAdd, variantStrategy: $variantStrategy) {
       product {
         id
         options {
@@ -588,15 +588,13 @@ export async function upsertProductOption(
   );
   if (newValues.length === 0) return [];
 
-  const allValues = [...match.values, ...newValues];
+  // Adding values to an existing option is a separate argument from the
+  // option itself — OptionUpdateInput (the `option` arg) only renames it.
   const response = await admin.graphql(UPDATE_PRODUCT_OPTION, {
     variables: {
       productId,
-      option: {
-        id: match.id,
-        name: optionName,
-        values: allValues.map((v) => ({ name: v })),
-      },
+      option: { id: match.id, name: optionName },
+      optionValuesToAdd: newValues.map((v) => ({ name: v })),
       variantStrategy: "LEAVE_AS_IS",
     },
   });
