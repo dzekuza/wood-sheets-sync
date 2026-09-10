@@ -42,6 +42,9 @@ export const FieldMappingSchema = z.object({
     "option2_name",
     "option2_values",
     "option2_value",
+    "option3_name",
+    "option3_values",
+    "option3_value",
     // Per-variant price (targets the specific variant matched by SKU, not all variants)
     "variant_price",
     "variant_compare_at_price",
@@ -78,7 +81,7 @@ export function extractSpreadsheetId(url: string): string {
   if (!match || !match[1]) {
     throw new Error(
       `Could not extract spreadsheet ID from URL: ${url}. ` +
-        `Expected a Google Sheets URL containing /spreadsheets/d/<id>.`
+        `Expected a Google Sheets URL containing /spreadsheets/d/<id>.`,
     );
   }
   return match[1];
@@ -88,38 +91,44 @@ export function extractSpreadsheetId(url: string): string {
 
 export const SHOPIFY_FIELDS = [
   // ── Product fields ──────────────────────────────────────────────────────────
-  { value: "title",            label: "Title" },
-  { value: "handle",           label: "Handle" },
-  { value: "body_html",        label: "Description" },
-  { value: "vendor",           label: "Vendor" },
-  { value: "product_type",     label: "Product Type" },
-  { value: "tags",             label: "Tags" },
-  { value: "status",           label: "Status (active / draft)" },
+  { value: "title", label: "Title" },
+  { value: "handle", label: "Handle" },
+  { value: "body_html", label: "Description" },
+  { value: "vendor", label: "Vendor" },
+  { value: "product_type", label: "Product Type" },
+  { value: "tags", label: "Tags" },
+  { value: "status", label: "Status (active / draft)" },
   // ── Variant fields ──────────────────────────────────────────────────────────
-  { value: "price",            label: "Price" },
+  { value: "price", label: "Price" },
   { value: "compare_at_price", label: "Compare At Price" },
-  { value: "sku",              label: "SKU" },
-  { value: "barcode",          label: "Barcode" },
+  { value: "sku", label: "SKU" },
+  { value: "barcode", label: "Barcode" },
   // ── Images ──────────────────────────────────────────────────────────────────
-  { value: "images",           label: "Images (pipe-separated URLs)" },
-  { value: "image_1",          label: "Image 1 (URL)" },
-  { value: "image_2",          label: "Image 2 (URL)" },
-  { value: "image_3",          label: "Image 3 (URL)" },
-  { value: "image_4",          label: "Image 4 (URL)" },
-  { value: "image_5",          label: "Image 5 (URL)" },
-  { value: "image_6",          label: "Image 6 (URL)" },
-  { value: "image_7",          label: "Image 7 (URL)" },
-  { value: "image_8",          label: "Image 8 (URL)" },
-  { value: "image_9",          label: "Image 9 (URL)" },
-  { value: "image_10",         label: "Image 10 (URL)" },
+  { value: "images", label: "Images (pipe-separated URLs)" },
+  { value: "image_1", label: "Image 1 (URL)" },
+  { value: "image_2", label: "Image 2 (URL)" },
+  { value: "image_3", label: "Image 3 (URL)" },
+  { value: "image_4", label: "Image 4 (URL)" },
+  { value: "image_5", label: "Image 5 (URL)" },
+  { value: "image_6", label: "Image 6 (URL)" },
+  { value: "image_7", label: "Image 7 (URL)" },
+  { value: "image_8", label: "Image 8 (URL)" },
+  { value: "image_9", label: "Image 9 (URL)" },
+  { value: "image_10", label: "Image 10 (URL)" },
   // ── Variant options ─────────────────────────────────────────────────────────
-  { value: "option1_name",     label: "Option 1 Name (e.g. Size)" },
-  { value: "option1_values",   label: "Option 1 Values (comma-separated)" },
-  { value: "option1_value",    label: "Option 1 Value (this row)" },
-  { value: "option2_name",     label: "Option 2 Name (e.g. Colour)" },
-  { value: "option2_values",   label: "Option 2 Values (comma-separated)" },
-  { value: "option2_value",    label: "Option 2 Value (this row)" },
+  { value: "option1_name", label: "Option 1 Name (e.g. Size)" },
+  { value: "option1_values", label: "Option 1 Values (comma-separated)" },
+  { value: "option1_value", label: "Option 1 Value (this row)" },
+  { value: "option2_name", label: "Option 2 Name (e.g. Colour)" },
+  { value: "option2_values", label: "Option 2 Values (comma-separated)" },
+  { value: "option2_value", label: "Option 2 Value (this row)" },
+  { value: "option3_name", label: "Option 3 Name (e.g. Material)" },
+  { value: "option3_values", label: "Option 3 Values (comma-separated)" },
+  { value: "option3_value", label: "Option 3 Value (this row)" },
   // ── Per-variant price (row must be matched by SKU) ───────────────────────────
-  { value: "variant_price",             label: "Variant Price (this SKU only)" },
-  { value: "variant_compare_at_price",  label: "Variant Compare At Price (this SKU only)" },
+  { value: "variant_price", label: "Variant Price (this SKU only)" },
+  {
+    value: "variant_compare_at_price",
+    label: "Variant Compare At Price (this SKU only)",
+  },
 ] as const;

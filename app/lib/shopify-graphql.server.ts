@@ -20,7 +20,7 @@ const FIND_VARIANT_BY_SKU = `#graphql
 
 export async function findVariantBySku(
   admin: AdminApiContext,
-  sku: string
+  sku: string,
 ): Promise<{ variantId: string; productId: string } | null> {
   const response = await admin.graphql(FIND_VARIANT_BY_SKU, {
     variables: { query: `sku:"${sku}"` },
@@ -92,7 +92,7 @@ export type ShopifyProductRow = {
 
 export async function listProducts(
   admin: AdminApiContext,
-  limit = 100
+  limit = 100,
 ): Promise<ShopifyProductRow[]> {
   const results: ShopifyProductRow[] = [];
   let after: string | undefined;
@@ -115,7 +115,9 @@ export async function listProducts(
               status: string;
               featuredImage?: { url: string } | null;
               variants: {
-                edges: Array<{ node: { id: string; sku: string; price: string } }>;
+                edges: Array<{
+                  node: { id: string; sku: string; price: string };
+                }>;
               };
             };
           }>;
@@ -168,7 +170,7 @@ const FIND_PRODUCT_BY_TITLE = `#graphql
 
 export async function findProductByTitle(
   admin: AdminApiContext,
-  title: string
+  title: string,
 ): Promise<{ variantId: string; productId: string } | null> {
   const response = await admin.graphql(FIND_PRODUCT_BY_TITLE, {
     variables: { query: `title:"${title}"` },
@@ -213,7 +215,7 @@ const FIND_PRODUCT_BY_HANDLE = `#graphql
 
 export async function findProductByHandle(
   admin: AdminApiContext,
-  handle: string
+  handle: string,
 ): Promise<{ variantId: string; productId: string } | null> {
   const response = await admin.graphql(FIND_PRODUCT_BY_HANDLE, {
     variables: { handle },
@@ -263,7 +265,7 @@ export async function updateProductFields(
     vendor: string;
     productType: string;
     tags: string[];
-  }>
+  }>,
 ): Promise<string[]> {
   const input: Record<string, unknown> = { id: productId };
 
@@ -326,11 +328,12 @@ export async function updateVariantFields(
     price: string;
     compareAtPrice: string | null;
     barcode: string;
-  }>
+  }>,
 ): Promise<string[]> {
   const variantInput: Record<string, unknown> = { id: variantId };
 
-  if (fields.sku !== undefined) variantInput.inventoryItem = { sku: fields.sku };
+  if (fields.sku !== undefined)
+    variantInput.inventoryItem = { sku: fields.sku };
   if (fields.price !== undefined) variantInput.price = fields.price;
   if (fields.compareAtPrice !== undefined)
     variantInput.compareAtPrice =
@@ -385,7 +388,7 @@ const GET_PRODUCT_IMAGES = `#graphql
 
 export async function getProductImageUrls(
   admin: AdminApiContext,
-  productId: string
+  productId: string,
 ): Promise<string[]> {
   const response = await admin.graphql(GET_PRODUCT_IMAGES, {
     variables: { id: productId },
@@ -433,7 +436,7 @@ export async function attachProductImages(
   admin: AdminApiContext,
   productId: string,
   imageUrls: string[],
-  altText = ""
+  altText = "",
 ): Promise<string[]> {
   const valid = imageUrls.filter((u) => u.startsWith("http"));
   if (valid.length === 0) return [];
@@ -441,7 +444,7 @@ export async function attachProductImages(
   // Fetch existing images and skip already-present ones
   const existing = await getProductImageUrls(admin, productId);
   const toAdd = valid.filter(
-    (url) => !existing.some((ex) => ex.includes(url) || url.includes(ex))
+    (url) => !existing.some((ex) => ex.includes(url) || url.includes(ex)),
   );
   if (toAdd.length === 0) return [];
 
@@ -532,7 +535,7 @@ export async function upsertProductOption(
   admin: AdminApiContext,
   productId: string,
   optionName: string,
-  optionValues: string[]
+  optionValues: string[],
 ): Promise<string[]> {
   if (!optionName || optionValues.length === 0) return [];
 
@@ -550,7 +553,7 @@ export async function upsertProductOption(
 
   const existing = optData.data?.product?.options ?? [];
   const match = existing.find(
-    (o) => o.name.toLowerCase() === optionName.toLowerCase()
+    (o) => o.name.toLowerCase() === optionName.toLowerCase(),
   );
 
   if (!match) {
@@ -574,14 +577,14 @@ export async function upsertProductOption(
       };
     };
     return (data.data?.productOptionsCreate?.userErrors ?? []).map(
-      (e) => `[option create ${optionName}] ${e.message}`
+      (e) => `[option create ${optionName}] ${e.message}`,
     );
   }
 
   // Option exists — find values that need to be added
   const existingValues = new Set(match.values.map((v) => v.toLowerCase()));
   const newValues = optionValues.filter(
-    (v) => !existingValues.has(v.toLowerCase())
+    (v) => !existingValues.has(v.toLowerCase()),
   );
   if (newValues.length === 0) return [];
 
@@ -605,7 +608,7 @@ export async function upsertProductOption(
     };
   };
   return (data.data?.productOptionUpdate?.userErrors ?? []).map(
-    (e) => `[option update ${optionName}] ${e.message}`
+    (e) => `[option update ${optionName}] ${e.message}`,
   );
 }
 
@@ -644,7 +647,7 @@ export async function createProduct(
     price?: string;
     compareAtPrice?: string | null;
     barcode?: string;
-  }
+  },
 ): Promise<{ productId: string; variantId: string } | { errors: string[] }> {
   // Step 1: create the product (product-level fields only)
   const productInput: Record<string, unknown> = {
@@ -690,7 +693,11 @@ export async function createProduct(
   const variantId = product.variants.edges[0]?.node.id ?? "";
 
   // Step 2: update the default variant with price/SKU/barcode
-  const hasVariantFields = fields.sku || fields.price || fields.compareAtPrice !== undefined || fields.barcode;
+  const hasVariantFields =
+    fields.sku ||
+    fields.price ||
+    fields.compareAtPrice !== undefined ||
+    fields.barcode;
   if (variantId && hasVariantFields) {
     const variantErrors = await updateVariantFields(
       admin,
@@ -701,7 +708,7 @@ export async function createProduct(
         price: fields.price,
         compareAtPrice: fields.compareAtPrice,
         barcode: fields.barcode,
-      }
+      },
     );
     if (variantErrors.length > 0) {
       return { errors: variantErrors };
@@ -763,25 +770,27 @@ export async function syncVariantCombinations(
   variantDetails: Array<{
     option1Value: string;
     option2Value?: string;
+    option3Value?: string;
     sku?: string;
     price?: string;
     compareAtPrice?: string | null;
     barcode?: string;
-  }> = []
+  }> = [],
+  option3Name?: string,
+  option3Values?: string[],
 ): Promise<string[]> {
-  type Combo = { o1: string; o2?: string };
+  type Combo = { o1: string; o2?: string; o3?: string };
   const desired: Combo[] = [];
 
-  if (option2Name && option2Values?.length) {
-    outer: for (const v1 of option1Values) {
-      for (const v2 of option2Values) {
+  const has2 = Boolean(option2Name && option2Values?.length);
+  const has3 = Boolean(option3Name && option3Values?.length);
+
+  outer: for (const v1 of option1Values) {
+    for (const v2 of has2 ? option2Values! : [undefined]) {
+      for (const v3 of has3 ? option3Values! : [undefined]) {
         if (desired.length >= MAX_SHOPIFY_VARIANTS) break outer;
-        desired.push({ o1: v1, o2: v2 });
+        desired.push({ o1: v1, o2: v2, o3: v3 });
       }
-    }
-  } else {
-    for (const v1 of option1Values.slice(0, MAX_SHOPIFY_VARIANTS)) {
-      desired.push({ o1: v1 });
     }
   }
 
@@ -804,31 +813,39 @@ export async function syncVariantCombinations(
     };
   };
 
+  const comboKey = (o1: string, o2?: string, o3?: string) =>
+    `${o1}|||${o2 ?? ""}|||${o3 ?? ""}`;
+
   const existingKeys = new Set(
     (varData.data?.product?.variants.edges ?? []).map(({ node }) => {
       const o1 =
         node.selectedOptions.find(
-          (o) => o.name.toLowerCase() === option1Name.toLowerCase()
+          (o) => o.name.toLowerCase() === option1Name.toLowerCase(),
         )?.value ?? "";
       const o2 = option2Name
-        ? node.selectedOptions.find(
-            (o) => o.name.toLowerCase() === option2Name.toLowerCase()
-          )?.value ?? ""
+        ? (node.selectedOptions.find(
+            (o) => o.name.toLowerCase() === option2Name.toLowerCase(),
+          )?.value ?? "")
         : "";
-      return `${o1}|||${o2}`;
-    })
+      const o3 = option3Name
+        ? (node.selectedOptions.find(
+            (o) => o.name.toLowerCase() === option3Name.toLowerCase(),
+          )?.value ?? "")
+        : "";
+      return comboKey(o1, o2, o3);
+    }),
   );
 
   const toCreate = desired.filter(
-    (c) => !existingKeys.has(`${c.o1}|||${c.o2 ?? ""}`)
+    (c) => !existingKeys.has(comboKey(c.o1, c.o2, c.o3)),
   );
   if (toCreate.length === 0) return [];
 
   const detailByCombo = new Map(
     variantDetails.map((detail) => [
-      `${detail.option1Value}|||${detail.option2Value ?? ""}`,
+      comboKey(detail.option1Value, detail.option2Value, detail.option3Value),
       detail,
-    ])
+    ]),
   );
 
   const variants = toCreate.map((c) => {
@@ -838,8 +855,11 @@ export async function syncVariantCombinations(
     if (option2Name && c.o2) {
       optionValues.push({ optionName: option2Name, name: c.o2 });
     }
+    if (option3Name && c.o3) {
+      optionValues.push({ optionName: option3Name, name: c.o3 });
+    }
     const v: Record<string, unknown> = { optionValues };
-    const detail = detailByCombo.get(`${c.o1}|||${c.o2 ?? ""}`);
+    const detail = detailByCombo.get(comboKey(c.o1, c.o2, c.o3));
     if (detail?.sku) v.inventoryItem = { sku: detail.sku };
     if (detail?.price ?? price) v.price = detail?.price ?? price;
     if (detail?.compareAtPrice !== undefined) {
@@ -870,7 +890,7 @@ export async function syncVariantCombinations(
   }
 
   return (data.data?.productVariantsBulkCreate?.userErrors ?? []).map(
-    (e) => `[variant create] ${e.message}`
+    (e) => `[variant create] ${e.message}`,
   );
 }
 
@@ -880,7 +900,9 @@ export async function findVariantByOptions(
   option1Name: string,
   option1Value: string,
   option2Name?: string,
-  option2Value?: string
+  option2Value?: string,
+  option3Name?: string,
+  option3Value?: string,
 ): Promise<string | null> {
   const response = await admin.graphql(GET_PRODUCT_VARIANTS, {
     variables: { id: productId },
@@ -903,17 +925,31 @@ export async function findVariantByOptions(
   const normalize = (value: string) => value.trim().toLowerCase();
   const match = (data.data?.product?.variants.edges ?? []).find(({ node }) => {
     const selectedOption1 = node.selectedOptions.find(
-      (option) => normalize(option.name) === normalize(option1Name)
+      (option) => normalize(option.name) === normalize(option1Name),
     );
     if (normalize(selectedOption1?.value ?? "") !== normalize(option1Value)) {
       return false;
     }
 
-    if (!option2Name) return true;
-    const selectedOption2 = node.selectedOptions.find(
-      (option) => normalize(option.name) === normalize(option2Name)
+    if (option2Name) {
+      const selectedOption2 = node.selectedOptions.find(
+        (option) => normalize(option.name) === normalize(option2Name),
+      );
+      if (
+        normalize(selectedOption2?.value ?? "") !==
+        normalize(option2Value ?? "")
+      ) {
+        return false;
+      }
+    }
+
+    if (!option3Name) return true;
+    const selectedOption3 = node.selectedOptions.find(
+      (option) => normalize(option.name) === normalize(option3Name),
     );
-    return normalize(selectedOption2?.value ?? "") === normalize(option2Value ?? "");
+    return (
+      normalize(selectedOption3?.value ?? "") === normalize(option3Value ?? "")
+    );
   });
 
   return match?.node.id ?? null;
@@ -943,7 +979,7 @@ export async function updateAllVariantsFields(
     price: string;
     compareAtPrice: string | null;
     barcode: string;
-  }>
+  }>,
 ): Promise<string[]> {
   // Collect all variant IDs
   const variantIds: string[] = [];
@@ -998,8 +1034,7 @@ export async function updateAllVariantsFields(
         };
       };
     };
-    const userErrors =
-      data.data?.productVariantsBulkUpdate?.userErrors ?? [];
+    const userErrors = data.data?.productVariantsBulkUpdate?.userErrors ?? [];
     errors.push(...userErrors.map((e) => `[bulk variant update] ${e.message}`));
   }
 

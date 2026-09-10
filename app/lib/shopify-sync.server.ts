@@ -14,10 +14,7 @@ import {
   upsertProductOption,
   syncVariantCombinations,
 } from "~/lib/shopify-graphql.server";
-import {
-  createSyncLog,
-  updateSyncLog,
-} from "~/lib/sync-logger.server";
+import { createSyncLog, updateSyncLog } from "~/lib/sync-logger.server";
 
 // Shopify field names that map to product-level vs variant-level mutations
 const PRODUCT_FIELDS = new Set([
@@ -30,12 +27,7 @@ const PRODUCT_FIELDS = new Set([
   "status",
 ]);
 
-const VARIANT_FIELDS = new Set([
-  "price",
-  "compare_at_price",
-  "sku",
-  "barcode",
-]);
+const VARIANT_FIELDS = new Set(["price", "compare_at_price", "sku", "barcode"]);
 
 // Per-variant price fields — same as VARIANT_FIELDS but only update the
 // specific variant matched by SKU, not all variants on the product.
@@ -50,7 +42,7 @@ const IMAGE_FIELDS = new Set([
   ...Array.from({ length: 10 }, (_, i) => `image_${i + 1}`),
 ]);
 
-// option1_name, option1_values, option2_name, option2_values
+// option1_name, option1_values, option2_name, option2_values, option3_name, option3_values
 const OPTION_FIELDS = new Set([
   "option1_name",
   "option1_values",
@@ -58,10 +50,80 @@ const OPTION_FIELDS = new Set([
   "option2_name",
   "option2_values",
   "option2_value",
+  "option3_name",
+  "option3_values",
+  "option3_value",
 ]);
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type OptionData = {
+  option1Name?: string;
+  option1Values?: string[];
+  option2Name?: string;
+  option2Values?: string[];
+  option3Name?: string;
+  option3Values?: string[];
+};
+
+// Upserts option1/2/3 definitions on the product, then ensures the desired
+// variant combination(s) exist — shared by the create-product and
+// update-existing-product paths, which otherwise duplicate this verbatim.
+async function applyProductOptions(
+  admin: AdminApiContext,
+  productId: string,
+  optionData: OptionData,
+  variantSku: string | undefined,
+  price: string | undefined,
+  compareAtPrice: string | undefined | null,
+  barcode: string | undefined,
+): Promise<string[]> {
+  const errors: string[] = [];
+  if (!optionData.option1Name || !optionData.option1Values?.length) {
+    return errors;
+  }
+
+  for (const [name, values] of [
+    [optionData.option1Name, optionData.option1Values],
+    [optionData.option2Name, optionData.option2Values],
+    [optionData.option3Name, optionData.option3Values],
+  ] as const) {
+    if (name && values?.length) {
+      errors.push(
+        ...(await upsertProductOption(admin, productId, name, values)),
+      );
+    }
+  }
+
+  const varErrors = await syncVariantCombinations(
+    admin,
+    productId,
+    optionData.option1Name,
+    optionData.option1Values,
+    optionData.option2Name,
+    optionData.option2Values,
+    price,
+    optionData.option1Values.length === 1
+      ? [
+          {
+            option1Value: optionData.option1Values[0],
+            option2Value: optionData.option2Values?.[0],
+            option3Value: optionData.option3Values?.[0],
+            sku: variantSku,
+            price,
+            compareAtPrice,
+            barcode,
+          },
+        ]
+      : [],
+    optionData.option3Name,
+    optionData.option3Values,
+  );
+  errors.push(...varErrors);
+
+  return errors;
 }
 
 function splitImageUrls(value: string): string[] {
@@ -71,7 +133,11 @@ function splitImageUrls(value: string): string[] {
     .filter((url) => url.startsWith("http"));
 }
 
-function getCell(row: string[], headerIndex: Map<string, number>, header: string): string {
+function getCell(
+  row: string[],
+  headerIndex: Map<string, number>,
+  header: string,
+): string {
   const index = headerIndex.get(header);
   return index === undefined ? "" : (row[index] ?? "").toString().trim();
 }
@@ -95,7 +161,8 @@ async function recordProductResult(
         productTitle,
         handle,
         status,
-        syncedFields: syncedFields.length > 0 ? JSON.stringify(syncedFields) : null,
+        syncedFields:
+          syncedFields.length > 0 ? JSON.stringify(syncedFields) : null,
         errorMessage: errorMessage ?? null,
       },
     });
@@ -107,7 +174,7 @@ async function recordProductResult(
 export async function runSync(
   shop: string,
   triggeredBy: "manual" | "scheduled",
-  admin: AdminApiContext
+  admin: AdminApiContext,
 ): Promise<{
   logId: string;
   updatedCount: number;
@@ -172,7 +239,8 @@ export async function runSync(
 
     // 5. Resolve the identifier column index
     const matchField = config.matchField ?? "sku";
-    const identifierColumnIndex = config.skuColumn != null ? headerIndex.get(config.skuColumn) : undefined;
+    const identifierColumnIndex =
+      config.skuColumn != null ? headerIndex.get(config.skuColumn) : undefined;
     if (identifierColumnIndex === undefined) {
       await updateSyncLog(logId, {
         status: "failed",
@@ -194,7 +262,9 @@ export async function runSync(
     // 6. Process each data row
     for (const row of dataRows) {
       // Check for cancellation request
-      const cancelRequest = await prisma.syncCancel.findUnique({ where: { shop } });
+      const cancelRequest = await prisma.syncCancel.findUnique({
+        where: { shop },
+      });
       if (cancelRequest) {
         await prisma.syncCancel.delete({ where: { shop } });
         await updateSyncLog(logId, {
@@ -254,6 +324,8 @@ export async function runSync(
         option1Values?: string[];
         option2Name?: string;
         option2Values?: string[];
+        option3Name?: string;
+        option3Values?: string[];
       } = {};
 
       for (const mapping of config.mappings) {
@@ -321,7 +393,8 @@ export async function runSync(
             });
           } else {
             // image_1 … image_10 → slot 0 … 9
-            const slot = parseInt(mapping.shopifyField.replace("image_", ""), 10) - 1;
+            const slot =
+              parseInt(mapping.shopifyField.replace("image_", ""), 10) - 1;
             if (rawValue.startsWith("http")) imageUrls[slot] = rawValue;
           }
         } else if (VARIANT_SPECIFIC_PRICE_FIELDS.has(mapping.shopifyField)) {
@@ -359,6 +432,18 @@ export async function runSync(
               break;
             case "option2_value":
               if (rawValue) optionData.option2Values = [rawValue];
+              break;
+            case "option3_name":
+              optionData.option3Name = rawValue;
+              break;
+            case "option3_values":
+              optionData.option3Values = rawValue
+                .split(",")
+                .map((v) => v.trim())
+                .filter(Boolean);
+              break;
+            case "option3_value":
+              if (rawValue) optionData.option3Values = [rawValue];
               break;
           }
         }
@@ -409,9 +494,20 @@ export async function runSync(
         });
 
         if ("errors" in result) {
-          errorMessages.push(...result.errors.map((e) => `[create ${identifier}] ${e}`));
+          errorMessages.push(
+            ...result.errors.map((e) => `[create ${identifier}] ${e}`),
+          );
           errorCount++;
-          await recordProductResult(logId, shop, "", title, "", "error", [], result.errors.join("; "));
+          await recordProductResult(
+            logId,
+            shop,
+            "",
+            title,
+            "",
+            "error",
+            [],
+            result.errors.join("; "),
+          );
         } else {
           // Attach images and options to the newly-created product
           const newProductId = result.productId;
@@ -421,57 +517,34 @@ export async function runSync(
               admin,
               newProductId,
               validImageUrls,
-              title
+              title,
             );
             if (imgErrors.length > 0) {
               errorMessages.push(...imgErrors);
             }
           }
 
-          if (optionData.option1Name && optionData.option1Values?.length) {
-            const optErrors = await upsertProductOption(
-              admin,
-              newProductId,
-              optionData.option1Name,
-              optionData.option1Values
-            );
-            if (optErrors.length > 0) errorMessages.push(...optErrors);
-          }
-          if (optionData.option2Name && optionData.option2Values?.length) {
-            const optErrors = await upsertProductOption(
-              admin,
-              newProductId,
-              optionData.option2Name,
-              optionData.option2Values
-            );
-            if (optErrors.length > 0) errorMessages.push(...optErrors);
-          }
-          if (optionData.option1Name && optionData.option1Values?.length) {
-            const varErrors = await syncVariantCombinations(
-              admin,
-              newProductId,
-              optionData.option1Name,
-              optionData.option1Values,
-              optionData.option2Name,
-              optionData.option2Values,
-              variantPayload.price,
-              optionData.option1Values.length === 1
-                ? [{
-                    option1Value: optionData.option1Values[0],
-                    option2Value: optionData.option2Values?.[0],
-                    sku: variantSku,
-                    price: variantPayload.price ?? variantSpecificPrice.price,
-                    compareAtPrice:
-                      variantPayload.compareAtPrice ??
-                      variantSpecificPrice.compareAtPrice,
-                    barcode: variantPayload.barcode,
-                  }]
-                : []
-            );
-            if (varErrors.length > 0) errorMessages.push(...varErrors);
-          }
+          const optionErrors = await applyProductOptions(
+            admin,
+            newProductId,
+            optionData,
+            variantSku,
+            variantPayload.price ?? variantSpecificPrice.price,
+            variantPayload.compareAtPrice ??
+              variantSpecificPrice.compareAtPrice,
+            variantPayload.barcode,
+          );
+          if (optionErrors.length > 0) errorMessages.push(...optionErrors);
 
-          await recordProductResult(logId, shop, newProductId, title, "", "updated", syncedFields);
+          await recordProductResult(
+            logId,
+            shop,
+            newProductId,
+            title,
+            "",
+            "updated",
+            syncedFields,
+          );
           updatedCount++;
         }
 
@@ -487,7 +560,7 @@ export async function runSync(
         const productErrors = await updateProductFields(
           admin,
           variant.productId,
-          productPayload
+          productPayload,
         );
         rowErrors.push(...productErrors);
       }
@@ -496,32 +569,37 @@ export async function runSync(
       const hasVariantFields = Object.keys(variantPayload).length > 0;
       const isShopifyCsvVariantRow =
         Boolean(rowHandle) &&
-        (headerIndex.has("Option1 Value") || headerIndex.has("Option2 Value"));
+        (headerIndex.has("Option1 Value") ||
+          headerIndex.has("Option2 Value") ||
+          headerIndex.has("Option3 Value"));
       if (hasVariantFields && !isShopifyCsvVariantRow) {
         const variantErrors = await updateAllVariantsFields(
           admin,
           variant.productId,
-          variantPayload
+          variantPayload,
         );
         rowErrors.push(...variantErrors);
       }
 
       // Apply per-variant price — updates ONLY the specific variant matched by SKU
       const rowVariantPrice =
-        variantSpecificPrice.price ?? (isShopifyCsvVariantRow ? variantPayload.price : undefined);
+        variantSpecificPrice.price ??
+        (isShopifyCsvVariantRow ? variantPayload.price : undefined);
       const rowVariantCompareAtPrice =
         variantSpecificPrice.compareAtPrice ??
         (isShopifyCsvVariantRow ? variantPayload.compareAtPrice : undefined);
       const hasVariantSpecificPrice =
         rowVariantPrice !== undefined || rowVariantCompareAtPrice !== undefined;
-      const hasRowVariantFields = hasVariantSpecificPrice || hasMappedVariantSku;
+      const hasRowVariantFields =
+        hasVariantSpecificPrice || hasMappedVariantSku;
       if (hasRowVariantFields) {
         if (isShopifyCsvVariantRow || matchField !== "sku") {
           const option1Value = optionData.option1Values?.[0];
           const option2Value = optionData.option2Values?.[0];
+          const option3Value = optionData.option3Values?.[0];
           if (!optionData.option1Name || !option1Value) {
             rowErrors.push(
-              "[variant row] Updating a specific variant without SKU matching requires option name/value columns."
+              "[variant row] Updating a specific variant without SKU matching requires option name/value columns.",
             );
           } else {
             const optionVariantId = await findVariantByOptions(
@@ -530,7 +608,9 @@ export async function runSync(
               optionData.option1Name,
               option1Value,
               optionData.option2Name,
-              option2Value
+              option2Value,
+              optionData.option3Name,
+              option3Value,
             );
 
             if (optionVariantId) {
@@ -542,7 +622,7 @@ export async function runSync(
                   sku: variantSku,
                   price: rowVariantPrice,
                   compareAtPrice: rowVariantCompareAtPrice,
-                }
+                },
               );
               rowErrors.push(...specificErrors);
             }
@@ -556,7 +636,7 @@ export async function runSync(
               sku: variantSku,
               price: rowVariantPrice,
               compareAtPrice: rowVariantCompareAtPrice,
-            }
+            },
           );
           rowErrors.push(...specificErrors);
         }
@@ -568,62 +648,47 @@ export async function runSync(
           admin,
           variant.productId,
           validImageUrls,
-          productPayload.title ?? ""
+          productPayload.title ?? "",
         );
         rowErrors.push(...imgErrors);
       }
 
-      // Upsert variant options
-      if (optionData.option1Name && optionData.option1Values?.length) {
-        const optErrors = await upsertProductOption(
-          admin,
-          variant.productId,
-          optionData.option1Name,
-          optionData.option1Values
-        );
-        rowErrors.push(...optErrors);
-      }
-      if (optionData.option2Name && optionData.option2Values?.length) {
-        const optErrors = await upsertProductOption(
-          admin,
-          variant.productId,
-          optionData.option2Name,
-          optionData.option2Values
-        );
-        rowErrors.push(...optErrors);
-      }
-      if (optionData.option1Name && optionData.option1Values?.length) {
-        const varErrors = await syncVariantCombinations(
-          admin,
-          variant.productId,
-          optionData.option1Name,
-          optionData.option1Values,
-          optionData.option2Name,
-          optionData.option2Values,
-          variantPayload.price,
-          optionData.option1Values.length === 1
-            ? [{
-                option1Value: optionData.option1Values[0],
-                option2Value: optionData.option2Values?.[0],
-                sku: variantSku,
-                price: variantPayload.price ?? rowVariantPrice,
-                compareAtPrice:
-                  variantPayload.compareAtPrice ??
-                  rowVariantCompareAtPrice,
-                barcode: variantPayload.barcode,
-              }]
-            : []
-        );
-        rowErrors.push(...varErrors);
-      }
+      // Upsert variant options and sync the desired combination(s)
+      const optionErrors = await applyProductOptions(
+        admin,
+        variant.productId,
+        optionData,
+        variantSku,
+        variantPayload.price ?? rowVariantPrice,
+        variantPayload.compareAtPrice ?? rowVariantCompareAtPrice,
+        variantPayload.barcode,
+      );
+      rowErrors.push(...optionErrors);
 
       if (rowErrors.length > 0) {
         errorCount++;
         errorMessages.push(`${identifier}: ${rowErrors.join("; ")}`);
-        await recordProductResult(logId, shop, variant.productId, productPayload.title ?? identifier, "", "error", syncedFields, rowErrors.join("; "));
+        await recordProductResult(
+          logId,
+          shop,
+          variant.productId,
+          productPayload.title ?? identifier,
+          "",
+          "error",
+          syncedFields,
+          rowErrors.join("; "),
+        );
       } else {
         updatedCount++;
-        await recordProductResult(logId, shop, variant.productId, productPayload.title ?? identifier, "", "updated", syncedFields);
+        await recordProductResult(
+          logId,
+          shop,
+          variant.productId,
+          productPayload.title ?? identifier,
+          "",
+          "updated",
+          syncedFields,
+        );
       }
 
       // Rate-limit: 100ms pause between rows
@@ -635,8 +700,8 @@ export async function runSync(
       errorCount === 0
         ? "success"
         : errorCount === totalRows
-        ? "failed"
-        : "partial";
+          ? "failed"
+          : "partial";
 
     await updateSyncLog(logId, {
       status,
