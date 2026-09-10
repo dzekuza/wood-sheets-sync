@@ -379,8 +379,8 @@ const GQL = {
 
   UPDATE_OPTION:
     "#graphql\n" +
-    "mutation($productId: ID!, $option: OptionUpdateInput!, $variantStrategy: ProductOptionUpdateVariantStrategy) {\n" +
-    "  productOptionUpdate(productId: $productId, option: $option, variantStrategy: $variantStrategy) {\n" +
+    "mutation($productId: ID!, $option: OptionUpdateInput!, $optionValuesToAdd: [OptionValueCreateInput!], $variantStrategy: ProductOptionUpdateVariantStrategy) {\n" +
+    "  productOptionUpdate(productId: $productId, option: $option, optionValuesToAdd: $optionValuesToAdd, variantStrategy: $variantStrategy) {\n" +
     "    product { id options { id name values } }\n" +
     "    userErrors { field message code }\n" +
     "  }\n" +
@@ -518,7 +518,7 @@ function upsertOptions_(productId, existingOptions, desiredOptions) {
     const existingVals = new Set(match.values.map((v) => v.toLowerCase()));
     const newVals = opt.values.filter((v) => !existingVals.has(v.toLowerCase()));
     if (newVals.length) {
-      toUpdate.push({ id: match.id, name: opt.name, values: match.values.concat(newVals) });
+      toUpdate.push({ id: match.id, name: opt.name, newValues: newVals });
     }
   });
 
@@ -533,10 +533,13 @@ function upsertOptions_(productId, existingOptions, desiredOptions) {
     checkErrors_(data.productOptionsCreate.userErrors, "option create");
   }
 
+  // Adding values to an existing option is a separate argument from the
+  // option itself — OptionUpdateInput (the `option` arg) only renames it.
   toUpdate.forEach((opt) => {
     const data = shopifyGraphQL_(GQL.UPDATE_OPTION, {
       productId,
-      option: { id: opt.id, name: opt.name, values: opt.values.map((v) => ({ name: v })) },
+      option: { id: opt.id, name: opt.name },
+      optionValuesToAdd: opt.newValues.map((v) => ({ name: v })),
       variantStrategy: "LEAVE_AS_IS",
     });
     checkErrors_(data.productOptionUpdate.userErrors, "option update");
