@@ -2,14 +2,23 @@
 // Sheets -> Shopify product sync, run manually from a spreadsheet menu.
 //
 // Setup (one-time):
-//   1. Shopify Admin -> Settings -> Apps and sales channels -> Develop apps
-//      -> Create an app -> Configure Admin API scopes: write_products
-//      -> Install app -> reveal the Admin API access token (shpat_...).
+//   1. In your app's Dev Dashboard (dev.shopify.com/dashboard) -> Settings ->
+//      copy the Client ID and Client secret. Confirm write_products is in the
+//      app version's Admin API scopes.
+//      Requires the app and the target store to be in the same Shopify
+//      organization (client credentials grant only works within one org) --
+//      if calls fail with "shop_not_permitted", use a store-level Custom App
+//      admin token instead (Settings > Apps > Develop apps in the store admin).
 //   2. In this script: Project Settings (gear icon) -> Script Properties -> Add:
-//        SHOPIFY_SHOP           = your-store.myshopify.com
-//        SHOPIFY_ACCESS_TOKEN   = shpat_...
+//        SHOPIFY_SHOP            = your-store.myshopify.com
+//        SHOPIFY_CLIENT_ID       = from the Dev Dashboard
+//        SHOPIFY_CLIENT_SECRET   = from the Dev Dashboard
 //   3. Reload the spreadsheet. A "Shopify Sync" menu appears.
 //      Run "Test connection" first, then "Sync ... to Shopify".
+//
+// No OAuth redirect, no server, no merchant install screen: the script
+// exchanges the client ID/secret for a short-lived (24h) access token itself
+// on every run, via the client credentials grant.
 //
 // Row shape expected (standard Shopify product-export CSV columns). A row
 // with no Handle is skipped. Rows sharing a Handle are one product; each
@@ -131,19 +140,59 @@ function syncToShopify() {
 function getConfig_() {
   const props = PropertiesService.getScriptProperties();
   const shop = props.getProperty("SHOPIFY_SHOP");
-  const token = props.getProperty("SHOPIFY_ACCESS_TOKEN");
-  if (!shop || !token) {
+  const clientId = props.getProperty("SHOPIFY_CLIENT_ID");
+  const clientSecret = props.getProperty("SHOPIFY_CLIENT_SECRET");
+  if (!shop || !clientId || !clientSecret) {
     throw new Error(
       "Missing config. Open Extensions > Apps Script > Project Settings > " +
-        'Script Properties and add SHOPIFY_SHOP (e.g. "your-store.myshopify.com") ' +
-        "and SHOPIFY_ACCESS_TOKEN (shpat_...)."
+        'Script Properties and add SHOPIFY_SHOP (e.g. "your-store.myshopify.com"), ' +
+        "SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET (from your app's Dev Dashboard " +
+        "Settings page)."
     );
   }
-  return { shop, token };
+  return { shop, clientId, clientSecret };
+}
+
+// Exchanges the app's client ID/secret for a short-lived access token via the
+// client credentials grant (works only when the app and the store are in the
+// same Shopify organization) — no merchant install, no redirect. Cached for
+// most of its ~24h lifetime so repeated calls in one run don't refetch it.
+function getAccessToken_() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get("SHOPIFY_TOKEN");
+  if (cached) return cached;
+
+  const { shop, clientId, clientSecret } = getConfig_();
+  const url = "https://" + shop + "/admin/oauth/access_token";
+  const response = UrlFetchApp.fetch(url, {
+    method: "post",
+    contentType: "application/x-www-form-urlencoded",
+    payload: {
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+    },
+    muteHttpExceptions: true,
+  });
+
+  const body = JSON.parse(response.getContentText());
+  if (!body.access_token) {
+    throw new Error(
+      "Failed to get access token: " +
+        response.getContentText() +
+        '. If this says "shop_not_permitted", the app and this store are not ' +
+        "in the same Shopify organization — use a store-level Custom App " +
+        "admin token instead (see the setup comment at the top of this file)."
+    );
+  }
+
+  const ttl = Math.min(Math.max(60, (body.expires_in || 3600) - 60), 21600);
+  cache.put("SHOPIFY_TOKEN", body.access_token, ttl);
+  return body.access_token;
 }
 
 function shopifyGraphQL_(query, variables) {
-  const { shop, token } = getConfig_();
+  const { shop } = getConfig_();
   const url =
     "https://" + shop + "/admin/api/" + API_VERSION + "/graphql.json";
 
@@ -151,7 +200,7 @@ function shopifyGraphQL_(query, variables) {
     const response = UrlFetchApp.fetch(url, {
       method: "post",
       contentType: "application/json",
-      headers: { "X-Shopify-Access-Token": token },
+      headers: { "X-Shopify-Access-Token": getAccessToken_() },
       payload: JSON.stringify({ query, variables }),
       muteHttpExceptions: true,
     });
