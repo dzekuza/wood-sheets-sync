@@ -46,9 +46,9 @@ const COLUMN_ALIASES: Record<string, string> = {
   "body (html)": "body_html",
   "product description": "body_html",
   "compare at price": "compare_at_price",
-  "compare_at_price": "compare_at_price",
+  compare_at_price: "compare_at_price",
   "product type": "product_type",
-  "product_type": "product_type",
+  product_type: "product_type",
   "image url": "images",
   "image urls": "images",
   "image src": "images",
@@ -65,6 +65,12 @@ const COLUMN_ALIASES: Record<string, string> = {
   "option 2 value": "option2_value",
   "option2 values": "option2_values",
   "option 2 values": "option2_values",
+  "option3 name": "option3_name",
+  "option 3 name": "option3_name",
+  "option3 value": "option3_value",
+  "option 3 value": "option3_value",
+  "option3 values": "option3_values",
+  "option 3 values": "option3_values",
   "variant sku": "sku",
   "variant price": "variant_price",
   "variant compare at price": "variant_compare_at_price",
@@ -120,7 +126,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const updateOnly = formData.get("updateOnly") === "true";
 
   if (!sheetUrl || !skuColumn) {
-    return json({ error: "Sheet URL and identifier column are required." }, { status: 400 });
+    return json(
+      { error: "Sheet URL and identifier column are required." },
+      { status: 400 },
+    );
   }
 
   let spreadsheetId: string;
@@ -144,18 +153,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (existing) {
     await prisma.sheetConfig.update({
       where: { id: existing.id },
-      data: { sheetUrl, sheetName, skuColumn, spreadsheetId, matchField, updateOnly },
+      data: {
+        sheetUrl,
+        sheetName,
+        skuColumn,
+        spreadsheetId,
+        matchField,
+        updateOnly,
+      },
     });
     configId = existing.id;
   } else {
     const created = await prisma.sheetConfig.create({
-      data: { shop, sheetUrl, sheetName, skuColumn, spreadsheetId, matchField, updateOnly },
+      data: {
+        shop,
+        sheetUrl,
+        sheetName,
+        skuColumn,
+        spreadsheetId,
+        matchField,
+        updateOnly,
+      },
     });
     configId = created.id;
   }
 
   const uniqueMappings = Array.from(
-    new Map(mappings.map((m) => [m.shopifyField, m])).values()
+    new Map(mappings.map((m) => [m.shopifyField, m])).values(),
   );
 
   await prisma.fieldMapping.deleteMany({ where: { sheetConfigId: configId } });
@@ -196,17 +220,27 @@ export default function Settings() {
 
   // Fallback: show previously-mapped column names while fresh headers load
   const savedColumns = config?.mappings.map((m) => m.sheetColumn) ?? [];
-  const displayHeaders = fetchedHeaders.length > 0 ? fetchedHeaders : savedColumns;
+  const displayHeaders =
+    fetchedHeaders.length > 0 ? fetchedHeaders : savedColumns;
 
   // Auto-fetch headers on mount if config already exists
   useEffect(() => {
-    if (config?.sheetUrl && config?.sheetName && headersFetcher.state === "idle" && fetchedHeaders.length === 0) {
+    if (
+      config?.sheetUrl &&
+      config?.sheetName &&
+      headersFetcher.state === "idle" &&
+      fetchedHeaders.length === 0
+    ) {
       headersFetcher.submit(
         { sheetUrl: config.sheetUrl, sheetName: config.sheetName },
-        { method: "POST", action: "/api/sheet-headers", encType: "application/json" },
+        {
+          method: "POST",
+          action: "/api/sheet-headers",
+          encType: "application/json",
+        },
       );
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Mapping state: column → shopify field
@@ -251,7 +285,11 @@ export default function Settings() {
   function loadColumns() {
     headersFetcher.submit(
       { sheetUrl, sheetName },
-      { method: "POST", action: "/api/sheet-headers", encType: "application/json" },
+      {
+        method: "POST",
+        action: "/api/sheet-headers",
+        encType: "application/json",
+      },
     );
   }
 
@@ -297,7 +335,9 @@ export default function Settings() {
             )}
             {saveError && (
               <Banner title="Error saving settings" tone="critical">
-                <Text as="p" variant="bodyMd">{saveError}</Text>
+                <Text as="p" variant="bodyMd">
+                  {saveError}
+                </Text>
               </Banner>
             )}
 
@@ -305,7 +345,9 @@ export default function Settings() {
             <Card>
               <BlockStack gap="400">
                 <BlockStack gap="100">
-                  <Text as="h2" variant="headingMd">Sheet URL &amp; Tab</Text>
+                  <Text as="h2" variant="headingMd">
+                    Sheet URL &amp; Tab
+                  </Text>
                   <Text as="p" variant="bodyMd" tone="subdued">
                     Paste your Google Sheet URL and tab name. Make sure the
                     sheet is shared as "Anyone with the link can view".
@@ -329,12 +371,20 @@ export default function Settings() {
                 />
                 {headersFetcher.data?.error && (
                   <Banner title="Could not load columns" tone="critical">
-                    <Text as="p" variant="bodyMd">{headersFetcher.data.error}</Text>
+                    <Text as="p" variant="bodyMd">
+                      {headersFetcher.data.error}
+                    </Text>
                   </Banner>
                 )}
                 <InlineStack>
-                  <Button onClick={loadColumns} loading={isLoadingHeaders} disabled={!sheetUrl}>
-                    {displayHeaders.length > 0 ? "Reload columns" : "Load columns"}
+                  <Button
+                    onClick={loadColumns}
+                    loading={isLoadingHeaders}
+                    disabled={!sheetUrl}
+                  >
+                    {displayHeaders.length > 0
+                      ? "Reload columns"
+                      : "Load columns"}
                   </Button>
                 </InlineStack>
               </BlockStack>
@@ -345,7 +395,9 @@ export default function Settings() {
               <Card>
                 <BlockStack gap="400">
                   <BlockStack gap="100">
-                    <Text as="h2" variant="headingMd">Column mapping</Text>
+                    <Text as="h2" variant="headingMd">
+                      Column mapping
+                    </Text>
                     <Text as="p" variant="bodyMd" tone="subdued">
                       Columns have been auto-mapped based on their names. Adjust
                       any that are incorrect, then save.
@@ -373,8 +425,8 @@ export default function Settings() {
                       matchField === "sku"
                         ? "Sheet column whose value matches the variant SKU in Shopify."
                         : matchField === "title"
-                        ? "Sheet column whose value matches the product title in Shopify."
-                        : "Sheet column whose value matches the product handle (URL slug)."
+                          ? "Sheet column whose value matches the product title in Shopify."
+                          : "Sheet column whose value matches the product handle (URL slug)."
                     }
                   />
 
@@ -387,7 +439,9 @@ export default function Settings() {
 
                   <Divider />
 
-                  <Text as="h3" variant="headingSm">Field mappings</Text>
+                  <Text as="h3" variant="headingSm">
+                    Field mappings
+                  </Text>
 
                   <BlockStack gap="300">
                     {displayHeaders.map((col) => (
