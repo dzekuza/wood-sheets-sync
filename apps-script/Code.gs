@@ -338,6 +338,22 @@ function normalizeStatus_(raw) {
   return "ACTIVE";
 }
 
+// Loose match key for option values: "Grey Oil", "grey-oil" and "grey_oil"
+// all collapse to "greyoil". Sheets sometimes hold a slugified value (e.g.
+// copied from an image filename) instead of the exact Shopify option label.
+function normKey_(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+// Money columns occasionally contain stray text (a placeholder like
+// "manual" left while a sheet is still being filled in). Sending that to
+// productVariantsBulkCreate/Update fails the WHOLE batch, so validate first.
+function isValidMoney_(s) {
+  return /^\d+(\.\d{1,2})?$/.test(String(s).trim());
+}
+
 // ── GraphQL operations ───────────────────────────────────────────────────
 
 const GQL = {
@@ -346,7 +362,7 @@ const GQL = {
     "query($handle: String!) {\n" +
     "  productByHandle(handle: $handle) {\n" +
     "    id\n" +
-    "    options { id name values }\n" +
+    "    options { id name values linkedMetafield { namespace key } }\n" +
     "  }\n" +
     "}",
 
@@ -388,9 +404,10 @@ const GQL = {
 
   GET_VARIANTS:
     "#graphql\n" +
-    "query($id: ID!) {\n" +
+    "query($id: ID!, $cursor: String) {\n" +
     "  product(id: $id) {\n" +
-    "    variants(first: 100) {\n" +
+    "    variants(first: 100, after: $cursor) {\n" +
+    "      pageInfo { hasNextPage endCursor }\n" +
     "      edges { node { id selectedOptions { name value } } }\n" +
     "    }\n" +
     "  }\n" +
@@ -432,7 +449,39 @@ const GQL = {
     "    mediaUserErrors { field message }\n" +
     "  }\n" +
     "}",
+
+  GET_COLOR_PATTERN_METAOBJECTS:
+    "#graphql\n" +
+    "query($cursor: String) {\n" +
+    "  metaobjects(type: \"shopify--color-pattern\", first: 250, after: $cursor) {\n" +
+    "    pageInfo { hasNextPage endCursor }\n" +
+    "    nodes { id displayName }\n" +
+    "  }\n" +
+    "}",
 };
+
+// Lazily-fetched, run-scoped cache of the shared "Color" swatch library
+// (metaobject type shopify--color-pattern) keyed by normKey_(label).
+// A linked option (see upsertOptions_) can only add values that already
+// exist in this library -- there is no display name/hex/image to invent one.
+let colorPatternMetaobjectCache_ = null;
+
+function getColorPatternMetaobjectMap_() {
+  if (colorPatternMetaobjectCache_) return colorPatternMetaobjectCache_;
+  const map = {};
+  let cursor = null;
+  do {
+    const data = shopifyGraphQL_(GQL.GET_COLOR_PATTERN_METAOBJECTS, { cursor });
+    data.metaobjects.nodes.forEach((n) => {
+      map[normKey_(n.displayName)] = { id: n.id, label: n.displayName };
+    });
+    cursor = data.metaobjects.pageInfo.hasNextPage
+      ? data.metaobjects.pageInfo.endCursor
+      : null;
+  } while (cursor);
+  colorPatternMetaobjectCache_ = map;
+  return map;
+}
 
 function findProductByHandle_(handle) {
   const data = shopifyGraphQL_(GQL.FIND_PRODUCT_BY_HANDLE, { handle });
@@ -484,7 +533,7 @@ function syncProduct_(group, log) {
     desiredOptions.push({ name: group.option3Name, values: group.optionValues[2] });
 
   if (desiredOptions.length) {
-    upsertOptions_(productId, existingOptions, desiredOptions);
+    upsertOptions_(productId, existingOptions, desiredOptions, log);
   }
 
   if (group.images.length) {
@@ -496,13 +545,13 @@ function syncProduct_(group, log) {
   }
 
   if (group.variants.length) {
-    syncVariants_(productId, group, desiredOptions);
+    syncVariants_(productId, group, desiredOptions, existingOptions, log);
   }
 
   log.push([group.handle, "ok", productId]);
 }
 
-function upsertOptions_(productId, existingOptions, desiredOptions) {
+function upsertOptions_(productId, existingOptions, desiredOptions, log) {
   const existingByName = {};
   existingOptions.forEach((o) => (existingByName[o.name.toLowerCase()] = o));
 
@@ -515,10 +564,15 @@ function upsertOptions_(productId, existingOptions, desiredOptions) {
       toCreate.push(opt);
       return;
     }
-    const existingVals = new Set(match.values.map((v) => v.toLowerCase()));
-    const newVals = opt.values.filter((v) => !existingVals.has(v.toLowerCase()));
+    const existingVals = new Set(match.values.map(normKey_));
+    const newVals = opt.values.filter((v) => !existingVals.has(normKey_(v)));
     if (newVals.length) {
-      toUpdate.push({ id: match.id, name: opt.name, newValues: newVals });
+      toUpdate.push({
+        id: match.id,
+        name: opt.name,
+        newValues: newVals,
+        linkedMetafield: match.linkedMetafield,
+      });
     }
   });
 
@@ -536,19 +590,93 @@ function upsertOptions_(productId, existingOptions, desiredOptions) {
   // Adding values to an existing option is a separate argument from the
   // option itself — OptionUpdateInput (the `option` arg) only renames it.
   toUpdate.forEach((opt) => {
+    const linked = opt.linkedMetafield;
+    let optionValuesToAdd;
+
+    if (linked) {
+      // Linked options (e.g. "Oil Colour" -> the shared Color swatch
+      // library) reject plain {name}: every value must reference an
+      // existing metaobject entry via linkedMetafieldValue instead.
+      const swatchMap = getColorPatternMetaobjectMap_();
+      const resolved = [];
+      const unresolved = [];
+      opt.newValues.forEach((v) => {
+        const entry = swatchMap[normKey_(v)];
+        if (entry) resolved.push({ linkedMetafieldValue: entry.id });
+        else unresolved.push(v);
+      });
+      if (unresolved.length) {
+        log.push([
+          opt.name,
+          "warn",
+          "Skipped adding " +
+            unresolved.join(", ") +
+            " — no matching swatch in the Color library yet. " +
+            "Add it in Shopify Admin (Settings > Custom data > Color, or " +
+            "via a product's option editor) first, then re-run.",
+        ]);
+      }
+      if (!resolved.length) return;
+      optionValuesToAdd = resolved;
+    } else {
+      optionValuesToAdd = opt.newValues.map((v) => ({ name: v }));
+    }
+
     const data = shopifyGraphQL_(GQL.UPDATE_OPTION, {
       productId,
       option: { id: opt.id, name: opt.name },
-      optionValuesToAdd: opt.newValues.map((v) => ({ name: v })),
+      optionValuesToAdd,
       variantStrategy: "LEAVE_AS_IS",
     });
     checkErrors_(data.productOptionUpdate.userErrors, "option update");
   });
 }
 
-function syncVariants_(productId, group, desiredOptions) {
-  const data = shopifyGraphQL_(GQL.GET_VARIANTS, { id: productId });
-  const edges = data.product.variants.edges;
+// Builds, per option slot (aligned with desiredOptions / option1-3), a
+// lookup from normKey_(raw sheet value) -> the exact label Shopify already
+// uses, so a slugified sheet cell ("grey-oil") resolves to the real option
+// value ("Grey Oil") instead of being treated as a brand-new one.
+function buildOptionValueCanonicalizers_(desiredOptions, existingOptions) {
+  const existingByName = {};
+  existingOptions.forEach((o) => (existingByName[o.name.toLowerCase()] = o));
+
+  return desiredOptions.map((opt) => {
+    const match = existingByName[opt.name.toLowerCase()];
+    const byKey = {};
+    if (match) {
+      match.values.forEach((v) => {
+        byKey[normKey_(v)] = v;
+      });
+      if (match.linkedMetafield) {
+        const swatchMap = getColorPatternMetaobjectMap_();
+        Object.keys(swatchMap).forEach((k) => {
+          if (!byKey[k]) byKey[k] = swatchMap[k].label;
+        });
+      }
+    }
+    return function (raw) {
+      if (!raw) return raw;
+      return byKey[normKey_(raw)] || raw;
+    };
+  });
+}
+
+function fetchAllVariantEdges_(productId) {
+  const edges = [];
+  let cursor = null;
+  do {
+    const data = shopifyGraphQL_(GQL.GET_VARIANTS, { id: productId, cursor });
+    edges.push(...data.product.variants.edges);
+    cursor = data.product.variants.pageInfo.hasNextPage
+      ? data.product.variants.pageInfo.endCursor
+      : null;
+  } while (cursor);
+  return edges;
+}
+
+function syncVariants_(productId, group, desiredOptions, existingOptions, log) {
+  const edges = fetchAllVariantEdges_(productId);
+  const canonicalize = buildOptionValueCanonicalizers_(desiredOptions, existingOptions);
 
   function keyFromSelectedOptions(selectedOptions) {
     return desiredOptions
@@ -556,7 +684,7 @@ function syncVariants_(productId, group, desiredOptions) {
         const found = selectedOptions.find(
           (s) => s.name.toLowerCase() === o.name.toLowerCase()
         );
-        return (found ? found.value : "").toLowerCase();
+        return normKey_(found ? found.value : "");
       })
       .join("|||");
   }
@@ -566,25 +694,53 @@ function syncVariants_(productId, group, desiredOptions) {
     existingByKey[keyFromSelectedOptions(e.node.selectedOptions)] = e.node.id;
   });
 
-  function keyFromVariant(v) {
-    const values = [v.option1, v.option2, v.option3];
-    return desiredOptions.map((_, i) => (values[i] || "").toLowerCase()).join("|||");
+  function keyFromValues(values) {
+    return desiredOptions.map((_, i) => normKey_(values[i] || "")).join("|||");
   }
 
   const toCreate = [];
   const toUpdate = [];
 
   group.variants.forEach((v) => {
-    const key = keyFromVariant(v);
+    const values = [v.option1, v.option2, v.option3].map((raw, i) => canonicalize[i](raw));
+    const key = keyFromValues(values);
     const existingId = existingByKey[key];
 
     const fields = {};
     if (v.sku) fields.inventoryItem = { sku: v.sku };
-    if (v.price) fields.price = v.price;
+    if (v.price) {
+      if (isValidMoney_(v.price)) {
+        fields.price = v.price;
+      } else {
+        log.push([
+          group.handle,
+          "warn",
+          'Skipped variant "' +
+            values.filter(Boolean).join(" / ") +
+            '" — invalid price "' +
+            v.price +
+            '" in the sheet (expected a plain number). Fix the cell and re-run.',
+        ]);
+        return;
+      }
+    }
     if (v.compareAtPrice === "" || v.compareAtPrice === "0") {
       fields.compareAtPrice = null;
     } else if (v.compareAtPrice) {
-      fields.compareAtPrice = v.compareAtPrice;
+      if (isValidMoney_(v.compareAtPrice)) {
+        fields.compareAtPrice = v.compareAtPrice;
+      } else {
+        log.push([
+          group.handle,
+          "warn",
+          'Skipped variant "' +
+            values.filter(Boolean).join(" / ") +
+            '" — invalid compare-at price "' +
+            v.compareAtPrice +
+            '" in the sheet. Fix the cell and re-run.',
+        ]);
+        return;
+      }
     }
     if (v.barcode) fields.barcode = v.barcode;
 
@@ -592,7 +748,7 @@ function syncVariants_(productId, group, desiredOptions) {
       toUpdate.push(Object.assign({ id: existingId }, fields));
     } else {
       const optionValues = desiredOptions
-        .map((o, i) => ({ optionName: o.name, name: [v.option1, v.option2, v.option3][i] }))
+        .map((o, i) => ({ optionName: o.name, name: values[i] }))
         .filter((ov) => ov.name);
       toCreate.push(Object.assign({ optionValues }, fields));
     }
